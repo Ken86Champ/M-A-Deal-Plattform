@@ -1,0 +1,72 @@
+/* Deal Origination — Design Tokens — Light + Electric */
+
+:root {
+  /* ── Basis ───────────────────────────────────────────────────────────────── */
+  --bg:        #F0F2FF;
+  --panel:     #FFFFFF;
+  --ink:       #0C0E1A;
+  --muted:     #7B82A0;
+  --line:      #E2E6F5;
+  --border:    #CDD2EC;
+  --ink-muted: #4A5170;
+
+  /* ── Ebene 1 · Off-Market = Vibrant Teal ────────────────────────────────── */
+  --l1:      #00B88A;
+  --l1-soft: rgba(0, 184, 138, 0.10);
+  --l1-line: rgba(0, 184, 138, 0.22);
+
+  /* ── Ebene 2 · On-Market = Electric Indigo ───────────────────────────────── */
+  --l2:      #5C6EFF;
+  --l2-soft: rgba(92, 110, 255, 0.10);
+  --l2-line: rgba(92, 110, 255, 0.22);
+
+  /* ── Status ──────────────────────────────────────────────────────────────── */
+  --go:    #00B88A;
+  --amber: #E8920A;
+  --red:   #E5383B;
+  --grey:  #C8CDDF;
+  --green: #00B88A;
+
+  /* ── Form ────────────────────────────────────────────────────────────────── */
+  --radius: 14px;
+
+  /* ── Marken-Gradient (Thermoskala) ───────────────────────────────────────── */
+  --brand-gradient: linear-gradient(
+    90deg,
+    #F6BE45, #E8663C, #C2416B, #6C4A96, #3D5CA6
+  );
+}
+
+/* ── Base Reset ──────────────────────────────────────────────────────────── */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Score colors ────────────────────────────────────────────────────────── */
+.score-go    { color: var(--go);    }
+.score-amber { color: var(--amber); }
+.score-grey  { color: var(--muted); }
+
+/* ── Gate dots ───────────────────────────────────────────────────────────── */
+.gate-gruen { background: var(--go);    }
+.gate-gelb  { background: var(--amber); }
+.gate-rot   { background: var(--red);   }
+.gate-offen { background: var(--grey);  }
+
+/* ── Monospace ───────────────────────────────────────────────────────────── */
+.tabular { font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; }
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar        { width: 4px; height: 4px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: var(--line); border-radius: 2px; }
+
+/* ── Selection ───────────────────────────────────────────────────────────── */
+::selection { background: rgba(92,110,255,0.18); color: var(--ink); }
