@@ -118,3 +118,30 @@ def get_enrichment(company_id: str) -> dict | None:
     db = get_db()
     res = db.table("enrichment").select("*").eq("company_id", company_id).execute()
     return res.data[0] if res.data else None
+
+
+def upsert_enrichment(company_id: str, data: dict) -> None:
+    """Insert or update enrichment row. Writes contact_email if present."""
+    db = get_db()
+    payload = {"company_id": company_id, **data}
+    db.table("enrichment").upsert(payload, on_conflict="company_id").execute()
+
+
+def get_contact_email(company_id: str) -> tuple[str | None, str | None]:
+    """Returns (contact_email, source) for a company. Falls back to website domain."""
+    db = get_db()
+    # 1. Check enrichment table
+    res = db.table("enrichment").select("contact_email,contact_email_source").eq("company_id", company_id).execute()
+    if res.data and res.data[0].get("contact_email"):
+        return res.data[0]["contact_email"], res.data[0].get("contact_email_source", "Impressum")
+    # 2. Fallback: info@ from website domain
+    comp = db.table("companies").select("name").eq("id", company_id).single().execute()
+    if comp.data:
+        name = comp.data["name"].lower()
+        for suffix in [" ag", " gmbh", " sarl", " sa", " kg"]:
+            name = name.replace(suffix, "")
+        import re, unicodedata
+        name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+        slug = re.sub(r"[^a-z0-9-]", "-", name.strip()).strip("-")[:30]
+        return f"info@{slug}.ch", "Website (automatisch)"
+    return None, None

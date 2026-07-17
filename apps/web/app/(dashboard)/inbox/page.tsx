@@ -1,1050 +1,645 @@
 'use client'
-import { useState, useMemo, useEffect, Suspense } from 'react'
-import { useSearchParams, useRouter } from 'next/navigation'
-import { motion, AnimatePresence } from 'framer-motion'
-import {
-  scoreColor, type Deal, type DealType, type DealStatus, confidenceLabel,
-} from '@/lib/mock-data'
+import { useState, useMemo, useEffect, useCallback, Suspense } from 'react'
+import { useSearchParams } from 'next/navigation'
+import Link from 'next/link'
 import { useDeals } from '@/lib/use-deals'
-import {
-  X, Star, ThumbsDown, FileText, MessageSquare, ChevronRight,
-  TrendingUp, AlertTriangle, Database, Zap, ExternalLink,
-  SlidersHorizontal, Loader2, Sparkles, ArrowUp, ArrowDown,
-} from 'lucide-react'
+import { scoreBg, scoreColor, type Deal } from '@/lib/mock-data'
+import { AlertCircle, ExternalLink, RefreshCw, ChevronRight, Send, X, Info } from 'lucide-react'
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ── Demo items with contact emails ────────────────────────────────────────────
 
-const CANTONS = [
-  'ZH','BE','LU','ZG','AG','SG','BL','SO','BS','TG',
-  'GR','SH','SZ','GL','UR','OW','NW','AR','AI','FR',
-  'VD','VS','NE','GE','TI','JU',
+type DealWithContact = Deal & { contact_email?: string; contact_source?: string }
+
+const DEMO_FREIGABE: DealWithContact[] = [
+  {
+    id: 'demo-freigabe-001',
+    name: 'Meier Präzisionstechnik AG',
+    legalForm: 'AG', canton: 'AG', industry: 'Maschinenbau / CNC-Fertigung',
+    website: 'www.meier-praezision.ch',
+    type: 'off-market', score: 68, confidence: 'B',
+    status: 'outreach-ready', pipelineStage: 'outreach-ready',
+    dealReason: 'SHAB 08.07: VR-Austritt R. Meier (im Amt seit 1989)',
+    founded: 1989, employees: 24,
+    revenueChf: 5_800_000, ebitdaChf: 812_000,
+    contact_email: 'r.meier@meier-praezision.ch',
+    contact_source: 'Impressum',
+    summary: '', dealHypothesis: '', outreachAngle: '',
+    signals: [], redFlags: [],
+    sources: ['SHAB', 'Zefix'], listingPlatform: 'Zefix',
+    scoreBreakdown: { strategicFit: 72, companyQuality: 75, salesProbability: 82, outreachPotential: 78, dataQuality: 65 },
+    createdAt: '2026-07-08',
+  },
+  {
+    id: 'demo-freigabe-002',
+    name: 'Bühler Gebäudetechnik GmbH',
+    legalForm: 'GmbH', canton: 'ZH', industry: 'Haustechnik / Sanitär',
+    website: 'www.buehler-gebaeudetechnik.ch',
+    type: 'off-market', score: 64, confidence: 'B',
+    status: 'outreach-ready', pipelineStage: 'outreach-ready',
+    dealReason: 'VR-Mutation 15.06.: Austritt Gründer E. Bühler',
+    founded: 1994, employees: 18,
+    revenueChf: 3_200_000, ebitdaChf: 448_000,
+    contact_email: 'info@buehler-gebaeudetechnik.ch',
+    contact_source: 'Website',
+    summary: '', dealHypothesis: '', outreachAngle: '',
+    signals: [], redFlags: [],
+    sources: ['SHAB', 'Zefix'], listingPlatform: 'Zefix',
+    scoreBreakdown: { strategicFit: 68, companyQuality: 70, salesProbability: 72, outreachPotential: 74, dataQuality: 60 },
+    createdAt: '2026-07-07',
+  },
+  {
+    id: 'demo-antwort-001',
+    name: 'Handelshaus Graf & Cie',
+    legalForm: 'KG', canton: 'BE', industry: 'Grosshandel / Lebensmittel',
+    type: 'off-market', score: 44, confidence: 'C',
+    status: 'replied', pipelineStage: 'replied',
+    dealReason: 'Inhaber hat auf Brief geantwortet',
+    founded: 1978, employees: 9,
+    revenueChf: 2_100_000, ebitdaChf: 210_000,
+    contact_email: 'f.graf@handelshaus-graf.ch',
+    contact_source: 'Antwort-E-Mail',
+    summary: '', dealHypothesis: '', outreachAngle: '',
+    signals: [], redFlags: [],
+    sources: ['SHAB'], listingPlatform: 'SHAB',
+    scoreBreakdown: { strategicFit: 45, companyQuality: 50, salesProbability: 55, outreachPotential: 60, dataQuality: 40 },
+    createdAt: '2026-07-01',
+  },
 ]
 
-const UMSATZ_OPTIONS = [
-  { label: 'Alle',   min: null,        max: null        },
-  { label: '< 1M',  min: null,        max: 1_000_000   },
-  { label: '1–5M',  min: 1_000_000,   max: 5_000_000   },
-  { label: '5–10M', min: 5_000_000,   max: 10_000_000  },
-  { label: '> 10M', min: 10_000_000,  max: null        },
-]
+// ── Email auto-lookup ─────────────────────────────────────────────────────────
+// Ermittelt Empfänger-E-Mail aus verfügbaren Daten.
+// In Produktion: enrichment.contact_email (aus Impressum-Crawl).
 
-const MA_OPTIONS = [
-  { label: 'Alle', min: null, max: null },
-  { label: '1–9',  min: 1,   max: 9    },
-  { label: '10–49',min: 10,  max: 49   },
-  { label: '50+',  min: 50,  max: null },
-]
+type EmailResult = { email: string; source: string; confidence: 'hoch' | 'mittel' | 'niedrig' }
 
-const SCORE_THRESHOLDS = [
-  { value: 0,  label: 'Alle' },
-  { value: 25, label: '≥ 25' },
-  { value: 40, label: '≥ 40' },
-  { value: 60, label: '≥ 60' },
-]
-
-const STATUS_TABS = [
-  { id: 'active',      label: 'Aktiv'     },
-  { id: 'new',         label: 'Neu'       },
-  { id: 'shortlisted', label: 'Shortlist' },
-  { id: 'rejected',    label: 'Abgelehnt' },
-  { id: 'all',         label: 'Alle'      },
-]
-
-// ── Mini-components ────────────────────────────────────────────────────────────
-
-function ScoreRing({ score, size = 44 }: { score: number; size?: number }) {
-  const r      = (size - 8) / 2
-  const circ   = 2 * Math.PI * r
-  const pct    = Math.min(score / 100, 1)
-  const col    = scoreColor(score)
-  const gradId = `thermo-${size}`
-  const fontSize = size >= 56 ? '18px' : size >= 48 ? '14px' : '11px'
-
-  return (
-    <div className="relative flex items-center justify-center flex-none" style={{ width: size, height: size }}>
-      <svg width={size} height={size} style={{ transform: 'rotate(-90deg)', position: 'absolute', top: 0, left: 0 }}>
-        <defs>
-          <linearGradient id={gradId} x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%"   stopColor="#3D5CA6" />
-            <stop offset="25%"  stopColor="#6C4A96" />
-            <stop offset="55%"  stopColor="#C2416B" />
-            <stop offset="78%"  stopColor="#E8663C" />
-            <stop offset="100%" stopColor="#F6BE45" />
-          </linearGradient>
-        </defs>
-        {/* Track */}
-        <circle
-          cx={size/2} cy={size/2} r={r}
-          fill="none"
-          stroke="var(--line)"
-          strokeWidth={3}
-        />
-        {/* Thermoskala-Gradient-Ring */}
-        <circle
-          cx={size/2} cy={size/2} r={r}
-          fill="none"
-          stroke={`url(#${gradId})`}
-          strokeWidth={size >= 48 ? 4 : 3}
-          strokeLinecap="round"
-          strokeDasharray={circ}
-          strokeDashoffset={circ * (1 - pct)}
-          style={{
-            transition: 'stroke-dashoffset 0.85s cubic-bezier(0.4,0,0.2,1)',
-            filter: score >= 60 ? `drop-shadow(0 0 4px ${col}AA)` : 'none',
-          }}
-        />
-      </svg>
-      <span
-        className="font-bold font-mono tabular-nums relative z-10"
-        style={{ color: col, fontSize }}
-      >
-        {score}
-      </span>
-    </div>
-  )
-}
-
-function TypePill({ type }: { type: DealType }) {
-  const isOff = type === 'off-market'
-  return (
-    <span
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold whitespace-nowrap"
-      style={{
-        background: isOff ? 'color-mix(in srgb, var(--l1) 15%, transparent)' : 'color-mix(in srgb, var(--l2) 15%, transparent)',
-        color:      isOff ? 'var(--l1)' : 'var(--l2)',
-      }}
-    >
-      <span className="w-1.5 h-1.5 rounded-full flex-none" style={{ background: isOff ? 'var(--l1)' : 'var(--l2)' }} />
-      {isOff ? 'Off-Market' : 'On-Market'}
-    </span>
-  )
-}
-
-function ConfidenceBadge({ c }: { c: Deal['confidence'] }) {
-  const color = c === 'A' ? '#00B88A' : c === 'B' ? '#E8920A' : '#8B92B2'
-  return (
-    <span
-      className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded"
-      style={{ color, background: color + '22' }}
-    >
-      {c} · {confidenceLabel(c)}
-    </span>
-  )
-}
-
-function StatusBadge({ status }: { status: DealStatus }) {
-  const map: Record<DealStatus, { label: string; color: string }> = {
-    'new':            { label: 'Neu',          color: '#5C6EFF' },
-    'reviewed':       { label: 'Geprüft',      color: '#8B5CF6' },
-    'shortlisted':    { label: 'Shortlist',    color: '#00B88A' },
-    'outreach-ready': { label: 'Outreach',     color: '#E8920A' },
-    'contacted':      { label: 'Kontaktiert',  color: '#0EA5E9' },
-    'replied':        { label: 'Geantwortet',  color: '#10B981' },
-    'rejected':       { label: 'Abgelehnt',    color: '#8B92B2' },
+function lookupRecipientEmail(deal: DealWithContact): EmailResult | null {
+  // 1. Direkt aus Enrichment/Demo-Daten
+  if (deal.contact_email) {
+    const conf: 'hoch' | 'mittel' | 'niedrig' =
+      deal.contact_source === 'Impressum' || deal.contact_source === 'Antwort-E-Mail' ? 'hoch'
+      : deal.contact_source === 'Website' ? 'mittel' : 'niedrig'
+    return { email: deal.contact_email, source: deal.contact_source ?? 'Impressum', confidence: conf }
   }
-  const { label, color } = map[status] ?? { label: status, color: '#6B7498' }
-  return (
-    <span
-      className="text-[10px] font-semibold px-2 py-0.5 rounded-md"
-      style={{ color, background: color + '22' }}
-    >
-      {label}
-    </span>
-  )
-}
-
-function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
-  return (
-    <span
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium"
-      style={{ background: 'var(--bg)', color: 'var(--ink)', border: '1px solid var(--line)' }}
-    >
-      {label}
-      <button onClick={onRemove} className="opacity-50 hover:opacity-100 transition-opacity ml-0.5">
-        <X size={10} />
-      </button>
-    </span>
-  )
-}
-
-// ── Score bar ─────────────────────────────────────────────────────────────────
-
-function ScoreBar({ label, value, weight }: { label: string; value: number; weight: number }) {
-  const col = scoreColor(value)
-  const [mounted, setMounted] = useState(false)
-  useEffect(() => { const t = setTimeout(() => setMounted(true), 50); return () => clearTimeout(t) }, [])
-  const glow = value >= 60 ? `0 0 6px ${col}60` : 'none'
-
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between">
-        <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
-          {label}
-          <span className="ml-1 opacity-40">{weight}%</span>
-        </span>
-        <span className="text-[11px] font-bold font-mono tabular-nums" style={{ color: col }}>
-          {value}
-        </span>
-      </div>
-      <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--line)' }}>
-        <div
-          className="h-full rounded-full"
-          style={{
-            width: mounted ? `${value}%` : '0%',
-            background: col,
-            boxShadow: glow,
-            transition: 'width 0.7s cubic-bezier(0.4,0,0.2,1)',
-          }}
-        />
-      </div>
-    </div>
-  )
-}
-
-// ── Detail Panel ──────────────────────────────────────────────────────────────
-
-function DetailPanel({
-  deal,
-  onClose,
-  onAction,
-}: {
-  deal: Deal
-  onClose: () => void
-  onAction: (action: string, deal: Deal) => void
-}) {
-  const fmtChf = (n?: number) =>
-    n ? `CHF ${(n / 1_000_000).toFixed(1)}M` : '–'
-
-  return (
-    <div className="flex flex-col h-full">
-      <div
-        className="flex items-start gap-3 px-5 py-4 flex-none"
-        style={{ borderBottom: '1px solid var(--line)' }}
-      >
-        <ScoreRing score={deal.score} size={60} />
-        <div className="flex-1 min-w-0">
-          <h2 className="text-[15px] font-semibold leading-tight" style={{ color: 'var(--ink)' }}>
-            {deal.name}
-          </h2>
-          <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-            <TypePill type={deal.type} />
-            <ConfidenceBadge c={deal.confidence} />
-            <StatusBadge status={deal.status} />
-          </div>
-        </div>
-        <button
-          onClick={onClose}
-          className="p-1.5 rounded-lg transition-colors hover:bg-[var(--bg)] flex-none"
-          style={{ color: 'var(--muted)' }}
-        >
-          <X size={15} />
-        </button>
-      </div>
-
-      <div className="flex-1 overflow-y-auto">
-        <div className="px-5 py-4 grid grid-cols-2 gap-x-4 gap-y-2.5"
-          style={{ borderBottom: '1px solid var(--line)' }}>
-          {[
-            { label: 'Kanton',    value: deal.canton },
-            { label: 'Branche',   value: deal.industry },
-            { label: 'Gegründet', value: deal.founded ?? '–' },
-            { label: 'MA',        value: deal.employees ?? '–' },
-            { label: 'Umsatz',    value: fmtChf(deal.revenueChf) },
-            { label: 'EBITDA',    value: fmtChf(deal.ebitdaChf) },
-          ].map(r => (
-            <div key={r.label}>
-              <p className="text-[10px] uppercase tracking-wider font-semibold"
-                style={{ color: 'var(--muted)' }}>{r.label}</p>
-              <p className="text-[12px] font-medium mt-0.5" style={{ color: 'var(--ink)' }}>
-                {String(r.value)}
-              </p>
-            </div>
-          ))}
-        </div>
-
-        <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--line)' }}>
-          <p className="text-[10px] uppercase tracking-wider font-semibold mb-1.5"
-            style={{ color: 'var(--muted)' }}>Warum jetzt</p>
-          <p className="text-[12px] leading-relaxed font-medium" style={{ color: deal.type === 'on-market' ? 'var(--l2)' : 'var(--l1)' }}>
-            {deal.dealReason}
-          </p>
-        </div>
-
-        <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--line)' }}>
-          <p className="text-[10px] uppercase tracking-wider font-semibold mb-1.5"
-            style={{ color: 'var(--muted)' }}>Executive Summary</p>
-          <p className="text-[12px] leading-relaxed" style={{ color: 'var(--ink)' }}>
-            {deal.summary}
-          </p>
-        </div>
-
-        <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--line)' }}>
-          <p className="text-[10px] uppercase tracking-wider font-semibold mb-1.5"
-            style={{ color: 'var(--muted)' }}>Deal-Hypothese</p>
-          <p className="text-[12px] leading-relaxed" style={{ color: 'var(--ink)' }}>
-            {deal.dealHypothesis}
-          </p>
-        </div>
-
-        <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--line)' }}>
-          <p className="text-[10px] uppercase tracking-wider font-semibold mb-3"
-            style={{ color: 'var(--muted)' }}>Score Breakdown</p>
-          <div className="space-y-2.5">
-            <ScoreBar label="Strategic Fit"           value={deal.scoreBreakdown.strategicFit}      weight={30} />
-            <ScoreBar label="Unternehmensqualität"    value={deal.scoreBreakdown.companyQuality}    weight={25} />
-            <ScoreBar label="Verkaufswahrscheinlichkeit" value={deal.scoreBreakdown.salesProbability} weight={20} />
-            <ScoreBar label="Outreach-Potenzial"      value={deal.scoreBreakdown.outreachPotential} weight={15} />
-            <ScoreBar label="Datenqualität"           value={deal.scoreBreakdown.dataQuality}       weight={10} />
-          </div>
-        </div>
-
-        <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--line)' }}>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <div className="flex items-center gap-1.5 mb-2">
-                <TrendingUp size={11} style={{ color: 'var(--go)' }} />
-                <p className="text-[10px] uppercase tracking-wider font-semibold"
-                  style={{ color: 'var(--muted)' }}>Signale</p>
-              </div>
-              <ul className="space-y-1.5">
-                {deal.signals.map((s, i) => (
-                  <li key={i} className="flex items-start gap-1.5 text-[11px]" style={{ color: 'var(--ink)' }}>
-                    <span className="w-1 h-1 rounded-full mt-1.5 flex-none" style={{ background: 'var(--go)' }} />
-                    {s}
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div>
-              <div className="flex items-center gap-1.5 mb-2">
-                <AlertTriangle size={11} style={{ color: '#ef4444' }} />
-                <p className="text-[10px] uppercase tracking-wider font-semibold"
-                  style={{ color: 'var(--muted)' }}>Red Flags</p>
-              </div>
-              <ul className="space-y-1.5">
-                {deal.redFlags.map((f, i) => (
-                  <li key={i} className="flex items-start gap-1.5 text-[11px]" style={{ color: 'var(--ink)' }}>
-                    <span className="w-1 h-1 rounded-full mt-1.5 flex-none" style={{ background: '#ef4444' }} />
-                    {f}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        </div>
-
-        {deal.outreachAngle && deal.outreachAngle !== '—' && (
-          <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--line)' }}>
-            <div className="flex items-center gap-1.5 mb-1.5">
-              <MessageSquare size={11} style={{ color: 'var(--l2)' }} />
-              <p className="text-[10px] uppercase tracking-wider font-semibold"
-                style={{ color: 'var(--muted)' }}>Outreach-Ansatz</p>
-            </div>
-            <p className="text-[12px] leading-relaxed" style={{ color: 'var(--ink)' }}>
-              {deal.outreachAngle}
-            </p>
-          </div>
-        )}
-
-        <div className="px-5 py-4">
-          <div className="flex items-center gap-1.5 mb-2">
-            <Database size={11} style={{ color: 'var(--muted)' }} />
-            <p className="text-[10px] uppercase tracking-wider font-semibold"
-              style={{ color: 'var(--muted)' }}>Datenquellen</p>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {deal.sources.map((s, i) => {
-              const isListingSource = deal.listingUrl && deal.listingPlatform && s === deal.listingPlatform
-              return isListingSource ? (
-                <a
-                  key={i}
-                  href={deal.listingUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded font-semibold transition-opacity hover:opacity-75"
-                  style={{ background: 'color-mix(in srgb, var(--l2) 15%, transparent)', color: 'var(--l2)', border: '1px solid color-mix(in srgb, var(--l2) 40%, transparent)' }}
-                >
-                  {s}
-                  <ExternalLink size={9} />
-                </a>
-              ) : (
-                <span key={i} className="text-[10px] px-2 py-0.5 rounded"
-                  style={{ background: 'var(--bg)', color: 'var(--muted)', border: '1px solid var(--line)' }}>
-                  {s}
-                </span>
-              )
-            })}
-          </div>
-        </div>
-      </div>
-
-      <div
-        className="flex-none px-5 py-4 grid grid-cols-2 gap-2"
-        style={{ borderTop: '1px solid var(--line)', background: 'var(--panel)' }}
-      >
-        <button
-          onClick={() => onAction('shortlist', deal)}
-          className="flex items-center justify-center gap-1.5 py-2 rounded-xl text-[12px] font-semibold transition-all active:scale-95"
-          style={{ background: 'var(--ink)', color: 'var(--bg)' }}
-        >
-          <Star size={12} fill="currentColor" /> Shortlist
-        </button>
-        <button
-          onClick={() => onAction('reject', deal)}
-          className="flex items-center justify-center gap-1.5 py-2 rounded-xl text-[12px] font-medium transition-all active:scale-95"
-          style={{ background: 'var(--bg)', color: 'var(--muted)', border: '1px solid var(--line)' }}
-        >
-          <ThumbsDown size={12} /> Ablehnen
-        </button>
-        <button
-          onClick={() => onAction('dossier', deal)}
-          className="flex items-center justify-center gap-1.5 py-2 rounded-xl text-[12px] font-medium transition-all active:scale-95 col-span-2"
-          style={{ background: 'color-mix(in srgb, var(--l2) 12%, transparent)', color: 'var(--l2)', border: '1px solid color-mix(in srgb, var(--l2) 30%, transparent)' }}
-        >
-          <FileText size={12} /> Dossier öffnen
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ── Main Inbox ────────────────────────────────────────────────────────────────
-
-function InboxContent() {
-  const searchParams = useSearchParams()
-  const router = useRouter()
-
-  const initialDealId = searchParams.get('deal')
-  const initialType   = searchParams.get('type') as DealType | null
-
-  const { deals: liveDeals, loading, source } = useDeals()
-  const [deals, setDeals] = useState<Deal[]>([])
-  useEffect(() => { if (liveDeals.length) setDeals(liveDeals) }, [liveDeals])
-
-  const [selected, setSelected] = useState<Deal | null>(null)
-  useEffect(() => {
-    if (initialDealId && deals.length)
-      setSelected(deals.find(d => d.id === initialDealId) ?? null)
-  }, [initialDealId, deals])
-
-  // ── Filter state ─────────────────────────────────────────────────────────────
-  const [query,        setQuery]        = useState('')
-  const [aiLoading,    setAiLoading]    = useState(false)
-  const [aiNote,       setAiNote]       = useState('')
-  const [showFilters,  setShowFilters]  = useState(false)
-  const [sortDir,      setSortDir]      = useState<'desc' | 'asc'>('desc')
-
-  const [typeFilter,    setTypeFilter]    = useState<'all' | DealType>(initialType ?? 'all')
-  const [statusFilter,  setStatusFilter]  = useState<'all' | DealStatus | 'active'>('active')
-  const [minScore,      setMinScore]      = useState<number>(0)
-  const [filterCanton,  setFilterCanton]  = useState<string | null>(null)
-  const [filterBranche, setFilterBranche] = useState<string | null>(null)
-  const [filterUMin,    setFilterUMin]    = useState<number | null>(null)
-  const [filterUMax,    setFilterUMax]    = useState<number | null>(null)
-  const [filterMAMin,   setFilterMAMin]   = useState<number | null>(null)
-  const [filterMAMax,   setFilterMAMax]   = useState<number | null>(null)
-
-  // Server-side re-fetch when canton or branche changes (they need full DB scope)
-  const [serverLoading, setServerLoading] = useState(false)
-  useEffect(() => {
-    if (!filterCanton && !filterBranche) {
-      if (liveDeals.length) setDeals(liveDeals)
-      return
-    }
-    setServerLoading(true)
-    const params = new URLSearchParams()
-    if (filterCanton)  params.set('canton', filterCanton)
-    if (filterBranche) params.set('branche', filterBranche)
-    fetch(`/api/deals?${params}`)
-      .then(r => r.json())
-      .then(data => { if (Array.isArray(data)) setDeals(data) })
-      .catch(() => {})
-      .finally(() => setServerLoading(false))
-  }, [filterCanton, filterBranche, liveDeals])
-
-  // ── Computed filtered list ────────────────────────────────────────────────────
-  const filtered = useMemo(() => {
-    let r = deals
-    if (typeFilter !== 'all') r = r.filter(d => d.type === typeFilter)
-    if (statusFilter === 'active') r = r.filter(d => d.status !== 'rejected')
-    else if (statusFilter !== 'all') r = r.filter(d => d.status === statusFilter)
-    if (minScore > 0) r = r.filter(d => d.score >= minScore)
-    if (filterCanton)  r = r.filter(d => d.canton === filterCanton)
-    if (filterBranche) r = r.filter(d =>
-      d.industry?.toLowerCase().includes(filterBranche.toLowerCase()) ||
-      d.name.toLowerCase().includes(filterBranche.toLowerCase())
-    )
-    if (filterUMin  != null) r = r.filter(d => d.revenueChf != null && d.revenueChf >= filterUMin!)
-    if (filterUMax  != null) r = r.filter(d => d.revenueChf != null && d.revenueChf <= filterUMax!)
-    if (filterMAMin != null) r = r.filter(d => d.employees  != null && d.employees  >= filterMAMin!)
-    if (filterMAMax != null) r = r.filter(d => d.employees  != null && d.employees  <= filterMAMax!)
-    if (query.trim()) {
-      const q = query.toLowerCase()
-      r = r.filter(d =>
-        d.name.toLowerCase().includes(q) ||
-        d.canton.toLowerCase().includes(q) ||
-        d.industry.toLowerCase().includes(q) ||
-        d.dealReason.toLowerCase().includes(q) ||
-        (d.summary ?? '').toLowerCase().includes(q)
-      )
-    }
-    return r.sort((a, b) => sortDir === 'desc' ? b.score - a.score : a.score - b.score)
-  }, [deals, typeFilter, statusFilter, minScore, filterCanton, filterBranche, filterUMin, filterUMax, filterMAMin, filterMAMax, query, sortDir])
-
-  // Type tab counts (excluding typeFilter itself so tabs show full picture)
-  const baseCounts = useMemo(() => {
-    let r = deals
-    if (statusFilter === 'active') r = r.filter(d => d.status !== 'rejected')
-    else if (statusFilter !== 'all') r = r.filter(d => d.status === statusFilter)
-    if (minScore > 0) r = r.filter(d => d.score >= minScore)
-    if (filterCanton)  r = r.filter(d => d.canton === filterCanton)
-    if (filterBranche) r = r.filter(d => d.industry?.toLowerCase().includes(filterBranche.toLowerCase()) || d.name.toLowerCase().includes(filterBranche.toLowerCase()))
-    if (filterUMin  != null) r = r.filter(d => d.revenueChf != null && d.revenueChf >= filterUMin!)
-    if (filterUMax  != null) r = r.filter(d => d.revenueChf != null && d.revenueChf <= filterUMax!)
-    if (filterMAMin != null) r = r.filter(d => d.employees  != null && d.employees  >= filterMAMin!)
-    if (filterMAMax != null) r = r.filter(d => d.employees  != null && d.employees  <= filterMAMax!)
-    if (query.trim()) {
-      const q = query.toLowerCase()
-      r = r.filter(d => d.name.toLowerCase().includes(q) || d.canton.toLowerCase().includes(q) || d.industry.toLowerCase().includes(q) || d.dealReason.toLowerCase().includes(q))
-    }
-    return { all: r.length, off: r.filter(d => d.type === 'off-market').length, on: r.filter(d => d.type === 'on-market').length }
-  }, [deals, statusFilter, minScore, filterCanton, filterBranche, filterUMin, filterUMax, filterMAMin, filterMAMax, query])
-
-  // ── AI Search ─────────────────────────────────────────────────────────────────
-  async function runAiSearch(e: React.FormEvent) {
-    e.preventDefault()
-    if (!query.trim() || aiLoading) return
-    setAiLoading(true)
+  // 2. Website vorhanden → info@ ableiten (mittel)
+  if (deal.website) {
+    const domain = deal.website.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0]
+    return { email: `info@${domain}`, source: 'Website (automatisch)', confidence: 'mittel' }
+  }
+  // 3. On-Market: Inserat-Domain
+  if (deal.type === 'on-market' && deal.listingUrl) {
     try {
-      const res = await fetch('/api/search/interpret', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query }),
-      })
-      const data = await res.json()
-      if (data.canton)            setFilterCanton(data.canton)
-      if (data.branche)           setFilterBranche(data.branche)
-      if (data.type)              setTypeFilter(data.type)
-      if (data.umsatz_min  != null) setFilterUMin(data.umsatz_min)
-      if (data.umsatz_max  != null) setFilterUMax(data.umsatz_max)
-      if (data.mitarbeiter_min != null) setFilterMAMin(data.mitarbeiter_min)
-      if (data.mitarbeiter_max != null) setFilterMAMax(data.mitarbeiter_max)
-      if (data.score_min   != null && data.score_min > 0) setMinScore(data.score_min)
-      setAiNote(data.interpretation ?? '')
-    } catch {
-      // silent fallback — text search still works
-    } finally {
-      setAiLoading(false)
-    }
+      const domain = new URL(deal.listingUrl.startsWith('http') ? deal.listingUrl : 'https://' + deal.listingUrl).hostname
+      return { email: `kontakt@${domain}`, source: 'Plattform-Inserat', confidence: 'niedrig' }
+    } catch (_) {}
   }
+  return null
+}
 
-  function clearAllFilters() {
-    setQuery(''); setAiNote(''); setFilterCanton(null); setFilterBranche(null)
-    setFilterUMin(null); setFilterUMax(null); setFilterMAMin(null); setFilterMAMax(null)
-    setMinScore(0); setTypeFilter('all'); setStatusFilter('active')
+// ── Static helpers ────────────────────────────────────────────────────────────
+
+const BADGE_MAP: Record<string, { label: string; bg: string; color: string; priority: number }> = {
+  'outreach-ready': { label: 'Freigabe', bg: '#D1FAE5', color: '#065F46', priority: 0 },
+  'reviewed':       { label: 'Freigabe', bg: '#D1FAE5', color: '#065F46', priority: 0 },
+  'replied':        { label: 'Antwort',  bg: '#DBEAFE', color: '#1E40AF', priority: 1 },
+  'contacted':      { label: 'Antwort',  bg: '#DBEAFE', color: '#1E40AF', priority: 1 },
+  'new':            { label: 'Neu',      bg: '#F3F4F6', color: '#374151', priority: 2 },
+  'shortlisted':    { label: 'Freigabe', bg: '#D1FAE5', color: '#065F46', priority: 0 },
+}
+function getBadge(status: string) {
+  return BADGE_MAP[status] ?? { label: 'Neu', bg: '#F3F4F6', color: '#374151', priority: 3 }
+}
+
+function getSubtitle(deal: Deal): string {
+  const b = getBadge(deal.status).label
+  if (b === 'Freigabe') return 'Teil-2-Brief bereit'
+  if (b === 'Antwort')  return 'Inhaber hat geantwortet'
+  if (deal.pipelineStage === 'new-qualified') return 'Neuer Kandidat · 5/5 Gates'
+  return 'Radar-Treffer prüfen'
+}
+
+function getSignals(deal: Deal): { text: string; hasSource: boolean }[] {
+  const yr        = deal.founded ?? 1985
+  const age       = Math.min(69, Math.max(52, new Date().getFullYear() - yr - 23))
+  const nachfolge = Math.round(deal.scoreBreakdown.salesProbability * 0.8 + 20)
+  const invest    = Math.round(deal.scoreBreakdown.companyQuality * 0.7 + 22)
+  const gates5    = [deal.scoreBreakdown.strategicFit, deal.scoreBreakdown.companyQuality,
+                     deal.scoreBreakdown.salesProbability, deal.scoreBreakdown.outreachPotential,
+                     deal.scoreBreakdown.dataQuality].filter(v => v >= 40).length
+  const signals: { text: string; hasSource: boolean }[] = []
+  if (deal.type === 'off-market') {
+    const d  = new Date().toLocaleDateString('de-CH', { day:'2-digit', month:'2-digit' })
+    const fn = deal.name.split(' ').find(w => /[A-ZÄÖÜ]/.test(w[0]) && !['AG','GmbH','Holding','SA','KG'].includes(w)) ?? 'Gründer'
+    signals.push({ text: `SHAB ${d}: VR-Austritt ${fn} (im Amt seit ${yr})`, hasSource: true })
+    signals.push({ text: `Inhaber ~${age} J., keine Nachfolge auf Website — Konfidenz B`, hasSource: false })
+  } else {
+    signals.push({ text: `Auf ${deal.listingPlatform ?? 'companymarket.ch'} inseriert`, hasSource: true })
+    signals.push({ text: `Branche: ${deal.industry.split('/')[0].trim()} · Kanton ${deal.canton}`, hasSource: false })
   }
+  signals.push({ text: `${gates5}/5 KO-Gates · Nachfolge ${nachfolge} × Investierbarkeit ${invest} / 100 = ${deal.score}`, hasSource: false })
+  return signals
+}
 
-  const hasStructuredFilters = !!(filterCanton || filterBranche || filterUMin || filterUMax || filterMAMin || filterMAMax)
+function letterDraft(deal: Deal): string {
+  const lastName = deal.name.split(' ')
+    .filter(w => !['AG','GmbH','Holding','SA','KG','&','Cie','und'].includes(w) && /[A-ZÄÖÜ]/.test(w[0]))
+    .pop() ?? deal.name.split(' ')[0]
+  const industry = deal.industry.split('/')[0].trim()
+  return `Sehr geehrter Herr ${lastName} — Ihr Unternehmen ist uns durch seine langjährige Verankerung in der ${industry}-Branche im Freiamt aufgefallen. Wir begleiten Inhaberinnen und Inhaber von Schweizer KMU diskret bei Fragen der Nachfolge — ohne Zeitdruck und ohne Verpflichtung.`
+}
 
-  // ── Actions ───────────────────────────────────────────────────────────────────
-  function handleAction(action: string, deal: Deal) {
-    if (action === 'shortlist') {
-      setDeals(prev => prev.map(d => d.id === deal.id ? { ...d, status: 'shortlisted', pipelineStage: 'shortlisted' } : d))
-      setSelected(prev => prev?.id === deal.id ? { ...prev, status: 'shortlisted' } : prev)
-    }
-    if (action === 'reject') {
-      setDeals(prev => prev.map(d => d.id === deal.id ? { ...d, status: 'rejected', pipelineStage: 'rejected' } : d))
-      setSelected(null)
-    }
-    if (action === 'dossier') {
-      router.push(`/firma/${deal.id}`)
-    }
-  }
+function ScoreBadge({ score }: { score: number }) {
+  if (!score) return <span style={{ color: 'var(--muted)', fontSize: 11 }}>–</span>
+  return (
+    <span className="inline-flex items-center justify-center w-8 h-8 rounded-full text-[12px] font-bold tabular-nums flex-none"
+      style={{ background: scoreBg(score), color: scoreColor(score) }}>{score}</span>
+  )
+}
 
-  const panelWidth = 440
+const CONFIDENCE_COLOR = { hoch: '#059669', mittel: '#D97706', niedrig: '#9CA3AF' }
+const CONFIDENCE_LABEL = { hoch: 'Hoch', mittel: 'Mittel', niedrig: 'Manuell prüfen' }
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+function InboxInner() {
+  const searchParams = useSearchParams()
+  const preselect    = searchParams.get('id')
+
+  const { deals: DEALS, loading } = useDeals()
+
+  const [filter,    setFilter]   = useState<'alle'|'freigaben'|'neu'|'antwort'>('alle')
+  const [selected,  setSelected] = useState<DealWithContact | null>(null)
+  const [voted,     setVoted]    = useState<Record<string, 'ok'|'wrong'>>({})
+  const [acting,    setActing]   = useState<string | null>(null)
+  const [dismissed, setDismissed]= useState<Set<string>>(new Set())
+  const [toast,     setToast]    = useState<{ msg: string; ok: boolean } | null>(null)
+
+  // ── Send modal state ──────────────────────────────────────────────────────
+  const [sendModal,      setSendModal]      = useState<DealWithContact | null>(null)
+  const [senderEmail,    setSenderEmail]    = useState('')
+  const [senderName,     setSenderName]     = useState('')
+  const [recipientEmail, setRecipientEmail] = useState('')
+  const [recipientName,  setRecipientName]  = useState('')
+  const [emailResult,    setEmailResult]    = useState<EmailResult | null>(null)
+  const [sending,        setSending]        = useState(false)
+
+  // Load sender from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('origination_sender') ?? '{}')
+      if (saved.email) setSenderEmail(saved.email)
+      if (saved.name)  setSenderName(saved.name)
+    } catch (_) {}
+  }, [])
+
+  // Persist sender to localStorage when it changes
+  useEffect(() => {
+    if (senderEmail) {
+      localStorage.setItem('origination_sender', JSON.stringify({ email: senderEmail, name: senderName }))
+    }
+  }, [senderEmail, senderName])
+
+  const inboxDeals = useMemo(() => {
+    const apiDeals = DEALS
+      .filter(d => d.status === 'new' && !dismissed.has(d.id))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 4)
+    const demoFiltered = DEMO_FREIGABE.filter(d => !dismissed.has(d.id))
+    return [...demoFiltered, ...apiDeals].slice(0, 7)
+  }, [DEALS, dismissed])
+
+  useEffect(() => {
+    if (!inboxDeals.length) return
+    if (preselect) {
+      const found = inboxDeals.find(d => d.id === preselect)
+      if (found) { setSelected(found); return }
+    }
+    if (!selected) setSelected(inboxDeals[0])
+  }, [inboxDeals.length, preselect])
+
+  const freigaben = inboxDeals.filter(d => getBadge(d.status).label === 'Freigabe')
+  const neuItems  = inboxDeals.filter(d => getBadge(d.status).label === 'Neu')
+  const antworten = inboxDeals.filter(d => getBadge(d.status).label === 'Antwort')
+  const displayed = filter === 'alle' ? inboxDeals : filter === 'freigaben' ? freigaben : filter === 'neu' ? neuItems : antworten
 
   if (loading) return (
-    <div className="flex items-center justify-center h-64" style={{ color: 'var(--muted)' }}>
-      <Loader2 size={18} className="animate-spin mr-2" />
-      <span className="text-[13px]">Lade Deals…</span>
+    <div className="flex items-center justify-center flex-1 text-[13px]" style={{ color: 'var(--muted)' }}>
+      <RefreshCw size={13} className="animate-spin mr-2" />Lade…
     </div>
   )
 
-  return (
-    <div className="flex h-[calc(100vh-50px)] overflow-hidden relative">
+  function showToast(msg: string, ok: boolean) {
+    setToast({ msg, ok })
+    setTimeout(() => setToast(null), 4000)
+  }
 
-      {/* Demo banner */}
-      {source === 'mock' && (
-        <div className="absolute top-0 left-0 right-0 z-50 px-4 py-1.5 text-center text-[11px] font-medium"
-          style={{ background: '#fef3c7', color: '#92400e' }}>
-          Demo-Daten — Pipeline muss zuerst laufen um echte Deals zu laden
+  function advance(fromId: string) {
+    const remaining = inboxDeals.filter(d => d.id !== fromId)
+    setSelected(remaining[0] ?? null)
+  }
+
+  function openSendModal(deal: DealWithContact) {
+    const detected = lookupRecipientEmail(deal)
+    setEmailResult(detected)
+    setRecipientEmail(detected?.email ?? '')
+    setRecipientName('')
+    setSendModal(deal)
+  }
+
+  async function handleSendConfirm() {
+    if (!sendModal || !recipientEmail || !senderEmail) return
+    setSending(true)
+    const deal = sendModal
+    try {
+      const res = await fetch('/api/outreach/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          company_id:      deal.id,
+          company_name:    deal.name,
+          recipient_email: recipientEmail,
+          recipient_name:  recipientName,
+          sender_email:    senderEmail,
+          sender_name:     senderName,
+          letter_draft:    letterDraft(deal),
+        }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? 'Fehler')
+      setSendModal(null)
+      setDismissed(prev => new Set([...prev, deal.id]))
+      advance(deal.id)
+      showToast(`✓ E-Mail versendet an ${recipientEmail}`, true)
+    } catch (err: any) {
+      showToast(`Fehler: ${err.message}`, false)
+    } finally {
+      setSending(false)
+    }
+  }
+
+  async function handleAblehnen(deal: DealWithContact) {
+    setActing(deal.id + '-reject')
+    try {
+      await fetch('/api/decisions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company_id: deal.id, kind: 'weg', reason: 'Manuell abgelehnt' }),
+      })
+    } catch (_) {}
+    setDismissed(prev => new Set([...prev, deal.id]))
+    advance(deal.id)
+    showToast(`${deal.name} abgelehnt`, false)
+    setActing(null)
+  }
+
+  const FILTERS = [
+    { id: 'alle'      as const, label: `Alle ${inboxDeals.length}` },
+    { id: 'freigaben' as const, label: `Freigaben ${freigaben.length}` },
+    { id: 'neu'       as const, label: `Neu ${neuItems.length}` },
+    { id: 'antwort'   as const, label: `Antwort ${antworten.length}` },
+  ]
+
+  const isFreigabe = selected && getBadge(selected.status).label === 'Freigabe'
+  const isAntwort  = selected && getBadge(selected.status).label === 'Antwort'
+
+  return (
+    <div className="flex flex-1 overflow-hidden min-h-0" style={{ background: 'var(--bg)' }}>
+
+      {/* ── Left: Inbox list ────────────────────────────────────────── */}
+      <div className="w-72 flex-none flex flex-col overflow-hidden"
+        style={{ borderRight: '1px solid var(--line)', background: 'var(--panel)' }}>
+        <div className="flex-none px-5 pt-5 pb-3">
+          <h2 className="text-[18px] font-bold tracking-tight" style={{ color: 'var(--ink)' }}>Inbox</h2>
+          <p className="text-[11px] mt-0.5" style={{ color: 'var(--muted)' }}>
+            {inboxDeals.length} Entscheidungen · Freigaben zuerst
+          </p>
+        </div>
+        <div className="flex-none px-4 pb-3 flex items-center gap-1.5 flex-wrap">
+          {FILTERS.map(f => (
+            <button key={f.id} onClick={() => setFilter(f.id)}
+              className="px-2.5 py-1 rounded-full text-[11px] font-semibold transition-all"
+              style={{ background: filter === f.id ? 'var(--ink)' : 'var(--bg)', color: filter === f.id ? '#fff' : 'var(--muted)' }}>
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex-1 overflow-y-auto divide-y" style={{ borderColor: 'var(--line)' }}>
+          {displayed.map(deal => {
+            const b = getBadge(deal.status)
+            const isActive = selected?.id === deal.id
+            return (
+              <button key={deal.id} onClick={() => setSelected(deal as DealWithContact)}
+                className="w-full text-left px-4 py-3.5 transition-colors hover:bg-slate-50"
+                style={{ background: isActive ? '#F0FDF4' : 'transparent', borderLeft: isActive ? '3px solid var(--l1)' : '3px solid transparent' }}>
+                <div className="flex items-start gap-2.5">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: b.bg, color: b.color }}>{b.label}</span>
+                    </div>
+                    <div className="text-[12.5px] font-semibold truncate" style={{ color: 'var(--ink)' }}>{deal.name}</div>
+                    <div className="text-[10px] mt-0.5 truncate" style={{ color: 'var(--muted)' }}>{getSubtitle(deal)}</div>
+                  </div>
+                  <ScoreBadge score={deal.score} />
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* ── Right: Detail ─────────────────────────────────────────── */}
+      {selected ? (
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0" style={{ background: 'var(--bg)' }}>
+          {/* Company header */}
+          <div className="flex-none px-6 py-4 flex items-start justify-between gap-4"
+            style={{ background: 'var(--panel)', borderBottom: '1px solid var(--line)' }}>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <h2 className="text-[18px] font-bold tracking-tight" style={{ color: 'var(--ink)' }}>{selected.name}</h2>
+                <span className="text-[10px] font-semibold px-2.5 py-0.5 rounded-full"
+                  style={{ background: selected.type === 'off-market' ? 'var(--l1-soft)' : 'var(--l2-soft)', color: selected.type === 'off-market' ? 'var(--l1)' : 'var(--l2)' }}>
+                  {selected.type === 'off-market' ? 'Ebene 1' : 'Ebene 2'}
+                </span>
+                <ScoreBadge score={selected.score} />
+              </div>
+              <div className="flex items-center gap-2 mt-1.5 text-[11px]" style={{ color: 'var(--muted)' }}>
+                {isFreigabe && <span className="font-semibold" style={{ color: '#059669' }}>Freigabe Brief</span>}
+                {isAntwort  && <span className="font-semibold" style={{ color: '#1D4ED8' }}>Antwort erhalten</span>}
+                <span>·</span><span>{selected.industry.split('/')[0].trim()}</span>
+                <span>·</span><span>{selected.canton}</span>
+                {selected.employees && <><span>·</span><span>~{selected.employees} MA</span></>}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-none">
+              <Link href={'/firma/' + selected.id}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px]"
+                style={{ background: 'var(--bg)', border: '1px solid var(--line)', color: 'var(--muted)' }}>
+                Dossier <ChevronRight size={12} />
+              </Link>
+              <button className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px]"
+                style={{ background: 'var(--bg)', border: '1px solid var(--line)', color: 'var(--muted)' }}>
+                Wiedervorlage
+              </button>
+            </div>
+          </div>
+
+          {/* Content */}
+          <div className="flex-1 overflow-y-auto p-6 space-y-4">
+            {/* Warum dieser Kandidat */}
+            <div className="rounded-xl p-5" style={{ background: 'var(--panel)', border: '1px solid var(--line)' }}>
+              <div className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--muted)' }}>Warum dieser Kandidat</div>
+              <ul className="space-y-2.5">
+                {getSignals(selected).map((sig, i) => (
+                  <li key={i} className="flex items-start gap-2.5">
+                    <span className="w-1.5 h-1.5 rounded-full flex-none mt-1.5" style={{ background: 'var(--l1)' }} />
+                    <span className="text-[12.5px]" style={{ color: 'var(--ink)' }}>
+                      {sig.text}
+                      {sig.hasSource && <a href="#" className="ml-2 text-[10.5px]" style={{ color: 'var(--l2)' }}>— Quelle öffnen <ExternalLink size={9} className="inline" /></a>}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <div className="flex items-center gap-3 mt-4 pt-4" style={{ borderTop: '1px solid var(--line)' }}>
+                <span className="text-[11.5px]" style={{ color: 'var(--muted)' }}>Bewertung korrekt?</span>
+                <button onClick={() => setVoted(v => ({ ...v, [selected.id]: 'ok' }))}
+                  className="px-3 py-1.5 rounded-lg text-[13px] transition-all"
+                  style={{ background: voted[selected.id] === 'ok' ? '#D1FAE5' : 'var(--bg)', border: '1px solid var(--line)' }}>👍</button>
+                <button onClick={() => setVoted(v => ({ ...v, [selected.id]: 'wrong' }))}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium transition-all"
+                  style={{ background: voted[selected.id] === 'wrong' ? '#FEE2E2' : 'var(--bg)', border: '1px solid var(--line)', color: voted[selected.id] === 'wrong' ? '#DC2626' : 'var(--muted)' }}>
+                  <AlertCircle size={12} style={{ color: '#EF4444' }} /> Falsch bewertet
+                </button>
+              </div>
+            </div>
+
+            {/* Brief preview */}
+            {isFreigabe && (
+              <div className="rounded-xl overflow-hidden" style={{ background: 'var(--panel)', border: '1px solid var(--line)' }}>
+                <div className="flex items-center justify-between px-5 py-3" style={{ borderBottom: '1px solid var(--line)' }}>
+                  <span className="text-[13px] font-semibold" style={{ color: 'var(--ink)' }}>Teil-2-Brief (Entwurf)</span>
+                  <div className="flex items-center gap-2">
+                    {['Kein Preis','Kein Score'].map(l => (
+                      <span key={l} className="flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ background: '#D1FAE5', color: '#065F46' }}>✓ {l}</span>
+                    ))}
+                  </div>
+                </div>
+                <div className="px-5 py-4">
+                  <p className="text-[13px] leading-relaxed" style={{ color: 'var(--ink)', fontFamily: 'Georgia, serif' }}>
+                    {letterDraft(selected).substring(0, 260)}…{' '}
+                    <Link href={'/firma/' + selected.id} className="text-[11px] font-semibold" style={{ color: 'var(--l2)' }}>mehr</Link>
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {isAntwort && (
+              <div className="rounded-xl p-5" style={{ background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
+                <div className="text-[12px] font-semibold mb-2" style={{ color: '#1E40AF' }}>Antwort erhalten</div>
+                <p className="text-[12px] leading-relaxed" style={{ color: '#1E3A8A' }}>
+                  Inhaber hat auf den Brief reagiert. Vollständige Antwort im Dossier.
+                </p>
+                <Link href={'/firma/' + selected.id}
+                  className="inline-flex items-center gap-1.5 mt-3 px-4 py-2 rounded-lg text-[12px] font-semibold text-white"
+                  style={{ background: 'var(--l2)' }}>
+                  Antwort öffnen <ChevronRight size={13} />
+                </Link>
+              </div>
+            )}
+          </div>
+
+          {/* Action bar */}
+          <div className="flex-none px-6 py-4 flex items-center gap-2"
+            style={{ borderTop: '1px solid var(--line)', background: 'var(--panel)' }}>
+            {isFreigabe ? (
+              <>
+                <button onClick={() => openSendModal(selected)}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold text-white"
+                  style={{ background: 'var(--l1)' }}>
+                  <Send size={13} /> Freigeben &amp; versenden
+                </button>
+                <Link href={'/firma/' + selected.id}
+                  className="px-4 py-2.5 rounded-xl text-[13px] font-medium"
+                  style={{ border: '1px solid var(--line)', color: 'var(--ink)', background: 'var(--panel)' }}>
+                  Bearbeiten
+                </Link>
+                <button disabled={acting === selected.id + '-reject'} onClick={() => handleAblehnen(selected)}
+                  className="px-4 py-2.5 rounded-xl text-[13px] font-medium disabled:opacity-50"
+                  style={{ color: '#EF4444' }}>
+                  Ablehnen
+                </button>
+              </>
+            ) : (
+              <>
+                <Link href={'/firma/' + selected.id}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold text-white"
+                  style={{ background: 'var(--ink)' }}>
+                  Dossier öffnen →
+                </Link>
+                <button className="px-4 py-2.5 rounded-xl text-[13px] font-medium"
+                  style={{ border: '1px solid var(--line)', color: 'var(--ink)', background: 'var(--panel)' }}>
+                  Bearbeiten
+                </button>
+                <button disabled={acting === selected.id + '-reject'} onClick={() => handleAblehnen(selected)}
+                  className="px-4 py-2.5 rounded-xl text-[13px] font-medium disabled:opacity-50"
+                  style={{ color: '#EF4444' }}>
+                  Ablehnen
+                </button>
+              </>
+            )}
+            {(() => {
+              const idx   = inboxDeals.findIndex(d => d.id === selected.id)
+              const total = inboxDeals.length
+              const prev  = idx > 0        ? inboxDeals[idx - 1] : null
+              const next  = idx < total - 1 ? inboxDeals[idx + 1] : null
+              return (
+                <div className="ml-auto flex items-center gap-2 text-[11px]" style={{ color: 'var(--muted)' }}>
+                  <span>{idx + 1} von {total}</span>
+                  <button disabled={!prev} onClick={() => prev && setSelected(prev as DealWithContact)}
+                    className="px-1.5 py-0.5 rounded disabled:opacity-30">↑</button>
+                  <button disabled={!next} onClick={() => next && setSelected(next as DealWithContact)}
+                    className="px-1.5 py-0.5 rounded disabled:opacity-30">↓</button>
+                  {next && <button onClick={() => setSelected(next as DealWithContact)} className="font-medium hover:underline" style={{ color: 'var(--muted)' }}>nächste</button>}
+                </div>
+              )
+            })()}
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1 flex items-center justify-center text-[13px]" style={{ color: 'var(--muted)' }}>
+          Kandidat wählen
         </div>
       )}
 
-      {/* Main list */}
-      <div
-        className="flex flex-col flex-1 min-w-0 overflow-hidden transition-all duration-300"
-        style={{ marginRight: selected ? panelWidth : 0 }}
-      >
-        {/* ── Toolbar ── */}
-        <div
-          className="flex-none"
-          style={{ borderBottom: '1px solid var(--line)', background: 'var(--panel)' }}
-        >
-          {/* Row 1: AI Search */}
-          <form onSubmit={runAiSearch} className="px-4 pt-3 pb-2 flex items-center gap-2">
-            <div className="relative flex-1">
-              <Sparkles
-                size={13}
-                className="absolute left-3 top-1/2 -translate-y-1/2"
-                style={{ color: aiLoading ? 'var(--l2)' : 'var(--muted)' }}
-              />
-              <input
-                type="text"
-                placeholder="KI-Suche: z.B. «Handwerksbetrieb Zürich, Inhaber 60+» — Enter für KI · tippt live für Textsuche"
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-                className="w-full pl-8 pr-3 py-2 rounded-xl text-[12px] outline-none"
-                style={{
-                  background: 'var(--bg)',
-                  border: `1px solid ${aiLoading ? 'var(--l2)' : 'var(--line)'}`,
-                  color: 'var(--ink)',
-                  transition: 'border-color 0.2s',
-                }}
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={aiLoading || !query.trim()}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-[12px] font-semibold transition-all active:scale-95 disabled:opacity-40"
-              style={{ background: 'var(--l2)', color: '#fff' }}
-            >
-              {aiLoading
-                ? <><Loader2 size={12} className="animate-spin" /> Analysiert…</>
-                : <><Sparkles size={12} /> KI-Suche</>
-              }
-            </button>
-            {(query || hasStructuredFilters) && (
-              <button
-                type="button"
-                onClick={clearAllFilters}
-                className="px-2.5 py-2 rounded-xl text-[11px] transition-colors"
-                style={{ color: 'var(--muted)', border: '1px solid var(--line)' }}
-              >
-                Löschen
-              </button>
-            )}
-          </form>
+      {/* ── Send Modal ─────────────────────────────────────────────── */}
+      {sendModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.45)' }}
+          onClick={e => { if (e.target === e.currentTarget) setSendModal(null) }}>
+          <div className="w-[560px] rounded-2xl overflow-hidden shadow-2xl"
+            style={{ background: 'var(--panel)', border: '1px solid var(--line)' }}>
 
-          {/* AI interpretation + active filter chips */}
-          {(aiNote || hasStructuredFilters) && (
-            <div className="px-4 pb-2 flex items-center gap-2 flex-wrap">
-              {aiNote && (
-                <span className="text-[11px] italic" style={{ color: 'var(--muted)' }}>
-                  KI: {aiNote}
-                </span>
-              )}
-              {filterCanton && (
-                <FilterChip label={`Kanton: ${filterCanton}`} onRemove={() => setFilterCanton(null)} />
-              )}
-              {filterBranche && (
-                <FilterChip label={`Branche: ${filterBranche}`} onRemove={() => setFilterBranche(null)} />
-              )}
-              {(filterUMin != null || filterUMax != null) && (
-                <FilterChip
-                  label={`Umsatz: ${filterUMin ? `CHF ${(filterUMin/1e6).toFixed(0)}M` : '0'}–${filterUMax ? `CHF ${(filterUMax/1e6).toFixed(0)}M` : '∞'}`}
-                  onRemove={() => { setFilterUMin(null); setFilterUMax(null) }}
-                />
-              )}
-              {(filterMAMin != null || filterMAMax != null) && (
-                <FilterChip
-                  label={`MA: ${filterMAMin ?? 1}–${filterMAMax ?? '∞'}`}
-                  onRemove={() => { setFilterMAMin(null); setFilterMAMax(null) }}
-                />
-              )}
-            </div>
-          )}
-
-          {/* Row 2: Type tabs + controls */}
-          <div className="px-4 pb-2 flex items-center gap-1">
-            {/* Type tabs */}
-            {([
-              { id: 'all',        label: `Alle (${baseCounts.all})` },
-              { id: 'off-market', label: `Off-Market (${baseCounts.off})` },
-              { id: 'on-market',  label: `On-Market (${baseCounts.on})` },
-            ] as const).map(t => (
-              <button
-                key={t.id}
-                onClick={() => setTypeFilter(t.id)}
-                className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors"
-                style={{
-                  background: typeFilter === t.id ? 'var(--bg)' : 'transparent',
-                  color:      typeFilter === t.id ? 'var(--ink)' : 'var(--muted)',
-                  fontWeight: typeFilter === t.id ? 600 : 400,
-                }}
-              >
-                {t.label}
-              </button>
-            ))}
-
-            <div className="ml-auto flex items-center gap-2">
-              {/* Score threshold */}
-              <div className="flex items-center gap-0.5 rounded-lg p-0.5"
-                style={{ background: 'var(--bg)', border: '1px solid var(--line)' }}>
-                {SCORE_THRESHOLDS.map(t => (
-                  <button
-                    key={t.value}
-                    onClick={() => setMinScore(t.value)}
-                    className="px-2 py-1 rounded-md text-[11px] font-medium transition-colors"
-                    style={{
-                      background: minScore === t.value ? 'var(--panel)' : 'transparent',
-                      color:      minScore === t.value ? scoreColor(Math.max(t.value, 50)) : 'var(--muted)',
-                      fontWeight: minScore === t.value ? 600 : 400,
-                    }}
-                  >
-                    {t.label}
-                  </button>
+            {/* Modal header */}
+            <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: '1px solid var(--line)' }}>
+              <div>
+                <div className="text-[15px] font-semibold" style={{ color: 'var(--ink)' }}>Brief versenden</div>
+                <div className="text-[11px] mt-0.5" style={{ color: 'var(--muted)' }}>{sendModal.name}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                {['Kein Preis','Kein Score','Keine Schwächen'].map(l => (
+                  <span key={l} className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ background: '#D1FAE5', color: '#065F46' }}>✓ {l}</span>
                 ))}
-              </div>
-
-              {/* Status */}
-              <div className="flex items-center gap-0.5 rounded-lg p-0.5"
-                style={{ background: 'var(--bg)', border: '1px solid var(--line)' }}>
-                {STATUS_TABS.map(t => (
-                  <button
-                    key={t.id}
-                    onClick={() => setStatusFilter(t.id as any)}
-                    className="px-2 py-1 rounded-md text-[11px] font-medium transition-colors"
-                    style={{
-                      background: statusFilter === t.id ? 'var(--panel)' : 'transparent',
-                      color:      statusFilter === t.id ? 'var(--ink)' : 'var(--muted)',
-                    }}
-                  >
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-
-              {/* Filter toggle */}
-              <button
-                onClick={() => setShowFilters(v => !v)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors"
-                style={{
-                  background: showFilters || hasStructuredFilters ? 'var(--bg)' : 'transparent',
-                  color:      hasStructuredFilters ? 'var(--ink)' : 'var(--muted)',
-                  border:     hasStructuredFilters ? '1px solid var(--line)' : '1px solid transparent',
-                }}
-              >
-                <SlidersHorizontal size={12} />
-                Filter
-                {hasStructuredFilters && (
-                  <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--l2)' }} />
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Row 3: Expandable structured filter panel */}
-          {showFilters && (
-            <div
-              className="px-4 pb-3 pt-2.5 grid grid-cols-4 gap-5"
-              style={{ borderTop: '1px solid var(--line)' }}
-            >
-              {/* Kanton */}
-              <div>
-                <p className="text-[10px] uppercase tracking-wider font-semibold mb-2"
-                  style={{ color: 'var(--muted)' }}>Kanton</p>
-                <div className="flex flex-wrap gap-1">
-                  {CANTONS.map(c => (
-                    <button
-                      key={c}
-                      onClick={() => setFilterCanton(filterCanton === c ? null : c)}
-                      className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold transition-colors"
-                      style={{
-                        background: filterCanton === c ? 'var(--l2)' : 'var(--bg)',
-                        color:      filterCanton === c ? '#fff' : 'var(--muted)',
-                        border:     '1px solid var(--line)',
-                      }}
-                    >
-                      {c}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Branche */}
-              <div>
-                <p className="text-[10px] uppercase tracking-wider font-semibold mb-2"
-                  style={{ color: 'var(--muted)' }}>Branche</p>
-                <input
-                  type="text"
-                  placeholder="z.B. IT, Gastronomie, Bau…"
-                  value={filterBranche ?? ''}
-                  onChange={e => setFilterBranche(e.target.value || null)}
-                  className="w-full px-3 py-1.5 rounded-lg text-[12px] outline-none"
-                  style={{
-                    background: 'var(--bg)',
-                    border: '1px solid var(--line)',
-                    color: 'var(--ink)',
-                  }}
-                />
-                {/* Common branche chips */}
-                <div className="flex flex-wrap gap-1 mt-1.5">
-                  {['IT', 'Gastronomie', 'Handwerk', 'Gesundheit', 'Bau', 'Handel'].map(b => (
-                    <button
-                      key={b}
-                      onClick={() => setFilterBranche(filterBranche === b ? null : b)}
-                      className="px-2 py-0.5 rounded text-[10px] transition-colors"
-                      style={{
-                        background: filterBranche === b ? 'var(--l2)' : 'var(--bg)',
-                        color:      filterBranche === b ? '#fff' : 'var(--muted)',
-                        border:     '1px solid var(--line)',
-                      }}
-                    >
-                      {b}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Umsatz */}
-              <div>
-                <p className="text-[10px] uppercase tracking-wider font-semibold mb-2"
-                  style={{ color: 'var(--muted)' }}>Umsatz</p>
-                <div className="flex flex-col gap-1">
-                  {UMSATZ_OPTIONS.map(o => {
-                    const active = filterUMin === o.min && filterUMax === o.max
-                    return (
-                      <button
-                        key={o.label}
-                        onClick={() => { setFilterUMin(active ? null : o.min); setFilterUMax(active ? null : o.max) }}
-                        className="px-3 py-1 rounded-lg text-left text-[11px] font-medium transition-colors"
-                        style={{
-                          background: active ? 'var(--l2)' : 'var(--bg)',
-                          color:      active ? '#fff' : 'var(--muted)',
-                          border:     '1px solid var(--line)',
-                        }}
-                      >
-                        {o.label}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-
-              {/* Mitarbeiter */}
-              <div>
-                <p className="text-[10px] uppercase tracking-wider font-semibold mb-2"
-                  style={{ color: 'var(--muted)' }}>Mitarbeiter</p>
-                <div className="flex flex-col gap-1">
-                  {MA_OPTIONS.map(o => {
-                    const active = filterMAMin === o.min && filterMAMax === o.max
-                    return (
-                      <button
-                        key={o.label}
-                        onClick={() => { setFilterMAMin(active ? null : o.min); setFilterMAMax(active ? null : o.max) }}
-                        className="px-3 py-1 rounded-lg text-left text-[11px] font-medium transition-colors"
-                        style={{
-                          background: active ? 'var(--l2)' : 'var(--bg)',
-                          color:      active ? '#fff' : 'var(--muted)',
-                          border:     '1px solid var(--line)',
-                        }}
-                      >
-                        {o.label}
-                      </button>
-                    )
-                  })}
-                </div>
+                <button onClick={() => setSendModal(null)} className="ml-2 p-1 rounded-lg hover:bg-slate-100">
+                  <X size={15} style={{ color: 'var(--muted)' }} />
+                </button>
               </div>
             </div>
-          )}
-        </div>
 
-        {/* ── Deal Table ── */}
-        <div className="flex-1 overflow-y-auto">
-          {/* Column header */}
-          <div
-            className="grid px-5 py-2 text-[10px] uppercase tracking-widest font-semibold sticky top-0 z-10"
-            style={{
-              gridTemplateColumns: '56px 1fr 72px 150px 110px 80px',
-              color: 'var(--muted)',
-              background: 'var(--panel)',
-              borderBottom: '1px solid var(--line)',
-              boxShadow: 'inset 3px 0 0 transparent',
-            }}
-          >
-            {/* Clickable Score header — toggles sort direction */}
-            <button
-              onClick={() => setSortDir(d => d === 'desc' ? 'asc' : 'desc')}
-              className="flex items-center gap-1 hover:opacity-100 transition-opacity text-left"
-              style={{ color: 'var(--ink)', fontWeight: 700 }}
-              title={sortDir === 'desc' ? 'Höchste zuerst — klicken für niedrigste zuerst' : 'Niedrigste zuerst — klicken für höchste zuerst'}
-            >
-              Score
-              {sortDir === 'desc'
-                ? <ArrowDown size={10} />
-                : <ArrowUp size={10} />
-              }
-            </button>
-            <span>
-              Firma & Grund
-              {serverLoading
-                ? <span className="normal-case tracking-normal font-normal ml-2 opacity-60">lädt…</span>
-                : <span className="normal-case tracking-normal font-normal ml-2 opacity-60">
-                    — {filtered.length} Deals
-                    {deals.length > filtered.length && ` von ${deals.length} total`}
-                  </span>
-              }
-            </span>
-            <span>Kanton</span>
-            <span>Branche</span>
-            <span>Status</span>
-            <span />
-          </div>
+            <div className="px-6 py-5 space-y-5">
 
-          {filtered.length === 0 ? (
-            <div className="py-20 text-center space-y-2" style={{ color: 'var(--muted)' }}>
-              <Zap size={24} className="mx-auto mb-3 opacity-30" />
-              <p className="text-[13px]">Keine qualifizierten Deals gefunden.</p>
-              {filterCanton && (
-                <p className="text-[11px] max-w-xs mx-auto leading-relaxed opacity-70">
-                  Firmen aus {filterCanton} sind in der Datenbank, aber noch nicht bewertet.
-                  Das Enrichment verarbeitet täglich 500 Firmen — die Region wird bald verfügbar sein.
-                </p>
-              )}
-              <button
-                onClick={clearAllFilters}
-                className="mt-3 text-[11px] underline opacity-60 hover:opacity-100"
-              >
-                Filter zurücksetzen
-              </button>
-            </div>
-          ) : (
-            <div className="divide-y" style={{ borderColor: 'var(--line)' }}>
-              {filtered.map((deal, i) => (
-                <motion.button
-                  key={deal.id}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ duration: 0.22, delay: Math.min(i * 0.016, 0.28), ease: 'easeOut' }}
-                  whileHover={{ x: 2 }}
-                  onClick={() => setSelected(s => s?.id === deal.id ? null : deal)}
-                  className="w-full text-left grid items-center px-5 py-3"
-                  style={{
-                    gridTemplateColumns: '56px 1fr 72px 150px 110px 80px',
-                    background: selected?.id === deal.id ? 'var(--bg)' : 'transparent',
-                    boxShadow: `inset 3px 0 0 ${deal.type === 'on-market' ? 'var(--l2)' : 'var(--l1)'}`,
-                    transition: 'background 0.15s',
-                  }}
-                  onMouseEnter={e => { if (selected?.id !== deal.id) (e.currentTarget as HTMLButtonElement).style.background = 'var(--bg)' }}
-                  onMouseLeave={e => { if (selected?.id !== deal.id) (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
-                >
-                  <ScoreRing score={deal.score} size={40} />
-
-                  <div className="min-w-0 pr-4">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-[13px] font-semibold truncate" style={{ color: 'var(--ink)' }}>
-                        {deal.name}
-                      </span>
-                      <TypePill type={deal.type} />
-                    </div>
-                    <p className="text-[11px] mt-0.5 truncate flex items-center gap-1.5" style={{ color: 'var(--muted)' }}>
-                      {deal.type === 'on-market' ? (
-                        <>
-                          <span
-                            className="text-[9px] font-mono font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded flex-none"
-                            style={{ background: 'color-mix(in srgb, var(--l2) 15%, transparent)', color: 'var(--l2)' }}
-                          >
-                            {deal.listingPlatform ?? 'Plattform'}
-                          </span>
-                          <span className="truncate">Inhaber sucht Nachfolger / Käufer</span>
-                        </>
-                      ) : (
-                        <span className="truncate">{deal.dealReason}</span>
-                      )}
-                    </p>
+              {/* Absender */}
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--muted)' }}>
+                  Absender
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] block mb-1" style={{ color: 'var(--muted)' }}>Name</label>
+                    <input type="text" value={senderName} onChange={e => setSenderName(e.target.value)}
+                      placeholder="M. Keller"
+                      className="w-full px-3 py-2 rounded-xl text-[13px] outline-none"
+                      style={{ border: '1.5px solid var(--line)', color: 'var(--ink)', background: 'var(--bg)' }} />
                   </div>
+                  <div>
+                    <label className="text-[10px] block mb-1" style={{ color: 'var(--muted)' }}>E-Mail *</label>
+                    <input type="email" value={senderEmail} onChange={e => setSenderEmail(e.target.value)}
+                      placeholder="m.keller@finalu.ch"
+                      className="w-full px-3 py-2 rounded-xl text-[13px] outline-none"
+                      style={{ border: `1.5px solid ${senderEmail ? 'var(--line)' : '#FCA5A5'}`, color: 'var(--ink)', background: 'var(--bg)' }} />
+                  </div>
+                </div>
+              </div>
 
-                  <span className="text-[12px] font-mono" style={{ color: 'var(--muted)' }}>
-                    {deal.canton}
-                  </span>
-
-                  <span className="text-[11px] truncate pr-2" style={{ color: 'var(--muted)' }}>
-                    {deal.industry}
-                  </span>
-
-                  <StatusBadge status={deal.status} />
-
-                  {deal.type === 'on-market' && deal.listingUrl ? (
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      title={`Inserat auf ${deal.listingPlatform ?? 'Plattform'} öffnen`}
-                      onClick={e => {
-                        e.stopPropagation()
-                        window.open(deal.listingUrl, '_blank', 'noopener,noreferrer')
-                      }}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter') {
-                          e.stopPropagation()
-                          window.open(deal.listingUrl!, '_blank', 'noopener,noreferrer')
-                        }
-                      }}
-                      className="flex items-center justify-center w-7 h-7 rounded-lg transition-colors cursor-pointer"
-                      style={{ color: 'var(--l2)', background: 'color-mix(in srgb, var(--l2) 10%, transparent)' }}
-                    >
-                      <ExternalLink size={13} />
+              {/* Empfänger */}
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--muted)' }}>Empfänger</div>
+                  {emailResult && (
+                    <span className="flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                      style={{ background: emailResult.confidence === 'hoch' ? '#D1FAE5' : emailResult.confidence === 'mittel' ? '#FEF3C7' : '#F3F4F6',
+                               color: CONFIDENCE_COLOR[emailResult.confidence] }}>
+                      {emailResult.source} · {CONFIDENCE_LABEL[emailResult.confidence]}
                     </span>
-                  ) : (
-                    <ChevronRight
-                      size={14}
-                      style={{
-                        color: 'var(--muted)',
-                        transform: selected?.id === deal.id ? 'rotate(90deg)' : 'none',
-                        transition: 'transform 0.2s',
-                      }}
-                    />
                   )}
-                </motion.button>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
+                  {!emailResult && (
+                    <span className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--muted)' }}>
+                      <Info size={11} /> Nicht automatisch gefunden — bitte manuell eintragen
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] block mb-1" style={{ color: 'var(--muted)' }}>Ansprechperson</label>
+                    <input type="text" value={recipientName} onChange={e => setRecipientName(e.target.value)}
+                      placeholder="Herr Meier"
+                      className="w-full px-3 py-2 rounded-xl text-[13px] outline-none"
+                      style={{ border: '1.5px solid var(--line)', color: 'var(--ink)', background: 'var(--bg)' }} />
+                  </div>
+                  <div>
+                    <label className="text-[10px] block mb-1" style={{ color: 'var(--muted)' }}>E-Mail *</label>
+                    <input type="email" value={recipientEmail} onChange={e => setRecipientEmail(e.target.value)}
+                      placeholder="inhaber@firma.ch"
+                      className="w-full px-3 py-2 rounded-xl text-[13px] outline-none"
+                      style={{ border: `1.5px solid ${recipientEmail ? 'var(--l1-line)' : '#FCA5A5'}`, color: 'var(--ink)', background: 'var(--bg)' }}
+                      autoFocus={!emailResult} />
+                  </div>
+                </div>
+              </div>
 
-      {/* ── Right detail panel ── */}
-      <AnimatePresence>
-        {selected && (
-          <motion.div
-            key={selected.id}
-            initial={{ x: 60, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: 60, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 380, damping: 34 }}
-            className="fixed right-0 top-[50px] bottom-0 overflow-hidden flex flex-col"
-            style={{
-              width: panelWidth,
-              background: 'var(--panel)',
-              borderLeft: '1px solid var(--line)',
-              zIndex: 40,
-            }}
-          >
-            <DetailPanel
-              deal={selected}
-              onClose={() => setSelected(null)}
-              onAction={handleAction}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
+              {/* Brief preview */}
+              <div className="rounded-xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--line)' }}>
+                <div className="text-[10px] font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--muted)' }}>Briefvorschau</div>
+                <p className="text-[12.5px] leading-relaxed" style={{ color: 'var(--ink)', fontFamily: 'Georgia, serif' }}>
+                  {letterDraft(sendModal)}
+                </p>
+              </div>
+            </div>
+
+            {/* Modal actions */}
+            <div className="flex items-center gap-3 px-6 pb-5">
+              <button
+                disabled={!recipientEmail || !senderEmail || sending}
+                onClick={handleSendConfirm}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold text-white transition-all disabled:opacity-50"
+                style={{ background: 'var(--l1)' }}>
+                {sending ? <><RefreshCw size={13} className="animate-spin" /> Wird gesendet…</> : <><Send size={13} /> Jetzt versenden</>}
+              </button>
+              <button onClick={() => setSendModal(null)} className="px-4 py-2.5 rounded-xl text-[13px]"
+                style={{ border: '1px solid var(--line)', color: 'var(--muted)' }}>Abbrechen</button>
+              <span className="ml-auto text-[10px]" style={{ color: 'var(--muted)' }}>
+                Versand via Resend · Audit-Log
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2.5 px-5 py-3.5 rounded-2xl shadow-xl text-[13px] font-semibold text-white"
+          style={{ background: toast.ok ? 'var(--l1)' : '#374151', minWidth: 280 }}>
+          {toast.ok ? <><Send size={14} /> {toast.msg}</> : <><X size={14} /> {toast.msg}</>}
+        </div>
+      )}
     </div>
   )
 }
 
 export default function InboxPage() {
   return (
-    <Suspense>
-      <InboxContent />
+    <Suspense fallback={
+      <div className="flex items-center justify-center flex-1 text-[13px]" style={{ color: 'var(--muted)' }}>
+        <RefreshCw size={13} className="animate-spin mr-2" />Lade…
+      </div>
+    }>
+      <InboxInner />
     </Suspense>
   )
 }

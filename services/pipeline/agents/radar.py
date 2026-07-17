@@ -3,13 +3,13 @@ Radar Agent — täglich 06:00.
 
 Ablauf:
   1. SHAB scannen (1 Tag zurück; 30 Tage beim Erstlauf)
-     → Firmen mit Rücktritts-Signal: company + source(latent/shab) + enrichment.shab_ruecktritt=True
-  2. Zefix Delta-Scan
-     → Alle neuen aktiven AG/GmbH: company(status=neu) + source(latent/zefix)
-  3. Broker-Connectors (Ebene 2)
-     → companymarket.ch + firmenboerse.com → company(status=neu, origination=listed)
+  2. Zefix Delta-Scan (alle neuen AG/GmbH)
+  3. Broker-Connectors Ebene 2 (alle 8 Plattformen)
+  4. Branchenbuch-Scan (local.ch)
 
-Schreibt ausschliesslich via db.py (Supabase).
+Plattformen:
+  companymarket.ch · firmenboerse.com · nachfolgeportal.ch · firmo.ch
+  firm4sale.ch · biz-trade.ch · business-broker.ch · local.ch
 """
 import hashlib
 import logging
@@ -27,7 +27,13 @@ from db import (
 from connectors.shab import scan as shab_scan
 from connectors.zefix import scan_delta
 from connectors.broker_companymarket import scan as cm_scan
-from connectors.broker_firmenboerse import scan as fb_scan
+from connectors.broker_firmenboerse  import scan as fb_scan
+from connectors.broker_nachfolgeportal import scan as np_scan
+from connectors.broker_firmo          import scan as firmo_scan
+from connectors.broker_firm4sale      import scan as f4s_scan
+from connectors.broker_biztrade       import scan as biztrade_scan
+from connectors.broker_businessbroker import scan as bb_scan
+from connectors.broker_localch        import scan as localch_scan
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +41,17 @@ log = logging.getLogger(__name__)
 FIRST_RUN_SHAB_DAYS = 30
 NORMAL_SHAB_DAYS    = 1
 
+# Alle Broker-Connectors mit Metadaten
+BROKER_CONNECTORS = [
+    { "fn": cm_scan,       "name": "companymarket.ch",   "active": True  },
+    { "fn": fb_scan,       "name": "firmenboerse.com",   "active": True  },
+    { "fn": np_scan,       "name": "nachfolgeportal.ch", "active": True  },
+    { "fn": firmo_scan,    "name": "firmo.ch",           "active": True  },
+    { "fn": f4s_scan,      "name": "firm4sale.ch",       "active": True  },
+    { "fn": biztrade_scan, "name": "biz-trade.ch",       "active": True  },
+    { "fn": bb_scan,       "name": "business-broker.ch", "active": True  },
+    { "fn": localch_scan,  "name": "local.ch",           "active": True  },
+]
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -52,12 +69,13 @@ def _count_companies() -> int:
 
 
 def _load_known_broker_refs() -> set[str]:
-    """Bereits bekannte externe Listing-URLs aus company_sources."""
+    """Bereits bekannte externe Listing-URLs aus allen Broker-Quellen."""
     db = get_db()
+    all_sources = [c["name"] for c in BROKER_CONNECTORS]
     res = (
         db.table("company_sources")
         .select("external_ref")
-        .in_("source_name", ["companymarket.ch", "firmenboerse.com"])
+        .in_("source_name", all_sources)
         .not_.is_("external_ref", "null")
         .execute()
     )
@@ -257,48 +275,80 @@ def run(canton_filter: list[str] | None = None) -> dict:
     # ── 2. Zefix Delta ───────────────────────────────────────────────────────
     log.info("--- Stufe 2/3: Zefix Delta-Scan (Streaming-Batches à 5000) ---")
     zefix_inserted = 0
+    from checkpoint import CheckpointRun
 
-    def _on_batch(batch: list[dict]) -> None:
-        nonlocal zefix_inserted
-        n = _flush_zefix_batch(batch)
-        zefix_inserted += n
-        log.info(f"Zefix: Batch geschrieben — {n} Firmen, {zefix_inserted} total")
+    with CheckpointRun("zefix", total=72000) as ckpt:
+        resume_cursor = ckpt.resume_cursor
+        if resume_cursor:
+            log.info(f"Zefix: Resume ab Cursor {resume_cursor}")
 
-    remaining = scan_delta(
-        known_uids=known_uids,
-        canton_filter=canton_filter,
-        on_batch=_on_batch,
-        batch_size=5_000,
-    )
-    # remaining is always [] when on_batch is set; safe to call anyway
-    zefix_inserted += _process_zefix(remaining, known_uids)
+        def _on_batch(batch: list[dict]) -> None:
+            nonlocal zefix_inserted
+            n = _flush_zefix_batch(batch)
+            zefix_inserted += n
+            log.info(f"Zefix: Batch geschrieben ● {n} Firmen, {zefix_inserted} total")
+
+        def _on_cursor(cursor: str) -> None:
+            ckpt.resume_cursor = cursor
+            ckpt._save()
+
+        remaining = scan_delta(
+            known_uids=known_uids,
+            canton_filter=canton_filter,
+            on_batch=_on_batch,
+            on_cursor=_on_cursor,
+            batch_size=5_000,
+            resume_cursor=resume_cursor,
+        )
+        zefix_inserted += _process_zefix(remaining, known_uids)
+
     log.info(f"Zefix fertig: {zefix_inserted} neue Firmen total")
 
-    # ── 3. Broker-Connectors (Ebene 2) ───────────────────────────────────────
-    log.info("--- Stufe 3/3: Broker-Connectors (Ebene 2) ---")
+    # ── 3. Broker-Connectors (Ebene 2) — alle 8 Plattformen ─────────────────
+    log.info(f"--- Stufe 3/3: Broker-Connectors ({len(BROKER_CONNECTORS)} Plattformen) ---")
     known_broker_refs = _load_known_broker_refs()
     log.info(f"Broker: {len(known_broker_refs)} Inserate bereits bekannt")
 
-    cm_listings  = cm_scan(known_external_refs=known_broker_refs)
-    cm_inserted  = _process_broker_listings(cm_listings, "companymarket.ch")
-    log.info(f"companymarket.ch: {cm_inserted} neue Inserate")
+    broker_stats: dict[str, int] = {}
+    broker_total = 0
 
-    fb_listings  = fb_scan(known_external_refs=known_broker_refs)
-    fb_inserted  = _process_broker_listings(fb_listings, "firmenboerse.com")
-    log.info(f"firmenboerse.com: {fb_inserted} neue Inserate")
+    for connector in BROKER_CONNECTORS:
+        if not connector.get("active", True):
+            continue
+        source_name = connector["name"]
+        fn          = connector["fn"]
+        try:
+            listings    = fn(known_refs=known_broker_refs)
+            # Normalize format (new connectors return different keys than old ones)
+            normalized = []
+            for item in listings:
+                normalized.append({
+                    "name":        item.get("title") or item.get("name", ""),
+                    "external_ref": item.get("url") or item.get("external_ref", ""),
+                    "canton":      item.get("canton"),
+                    "branche":     item.get("branche"),
+                    "rechtsform":  item.get("rechtsform"),
+                    "umsatz_est_chf": item.get("umsatz_est_chf"),
+                    "mitarbeiter_est": item.get("mitarbeiter_est"),
+                })
+            inserted = _process_broker_listings(normalized, source_name)
+            broker_stats[source_name] = inserted
+            broker_total += inserted
+            log.info(f"{source_name}: {inserted} neue Inserate")
+        except Exception as e:
+            log.error(f"{source_name} Fehler: {e}")
+            broker_stats[source_name] = 0
 
-    broker_total = cm_inserted + fb_inserted
     log.info(f"Broker fertig: {broker_total} neue Inserate total")
 
     total_new = shab_neu + zefix_inserted + broker_total
     log.info(f"=== Radar fertig: {total_new} neue Firmen total ===")
 
     return {
-        "shab_neu":          shab_neu,
-        "shab_updates":      shab_update,
-        "zefix_neu":         zefix_inserted,
-        "broker_neu":        broker_total,
-        "broker_companymarket": cm_inserted,
-        "broker_firmenboerse":  fb_inserted,
-        "total_neu":         total_new,
+        "shab_neu":      shab_neu,
+        "shab_updates":  shab_update,
+        "zefix_neu":     zefix_inserted,
+        "broker_neu":    broker_total,
+        "broker_detail": broker_stats,
+        "total_neu":     total_new,
     }

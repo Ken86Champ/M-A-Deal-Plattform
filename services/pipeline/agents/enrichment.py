@@ -51,12 +51,15 @@ Gib NUR valides JSON zurück — kein Markdown, keine Erklärung.
   "wiederkehr_signal": <0.0–1.0, wie stark sind Anzeichen für wiederkehrenden Umsatz>,
   "kundendiversifikation": <0.0–1.0, Einschätzung Kundendiversifikation; 1.0=sehr diversifiziert>,
   "web_last_update_years": <geschätzte Jahre seit letztem inhaltlichen Update, oder null>,
-  "mitarbeiter_est": <Schätzung Mitarbeiterzahl als Zahl, oder null>
+  "mitarbeiter_est": <Schätzung Mitarbeiterzahl als Zahl, oder null>,
+  "contact_email": "<E-Mail-Adresse aus Impressum oder Kontaktseite, oder null>",
+  "contact_email_source": "<'Impressum' | 'Kontaktseite' | 'Website', oder null>"
 }
 
 Konfidenz: A=explizit auf Website, B=klar ableitbar, C=geschätzt.
 Inhaberalter: Wenn Jahrgang/Geburtsjahr erwähnt, berechne das Alter für 2026.
 Personenname im Firmennamen: prüfe Firmenname auf Personennamen (z.B. "Müller AG", "Hans Bauer GmbH").
+contact_email: Suche im Text nach E-Mail-Adressen (Muster: wort@domain.tld). Bevorzuge Impressum/Kontakt-Adressen.
 Firmennamen wird als user_firmennamen mitgeliefert."""
 
 
@@ -193,32 +196,54 @@ def enrich_company(company: dict, client: httpx.Client) -> bool:
 
 def run(limit: int = 500, statuses: list[str] | None = None) -> None:
     log.info("Enrichment: Start")
+    from checkpoint import CheckpointRun
 
     db = get_db()
     target_statuses = statuses or ["neu", "bewertet"]
 
-    companies: list[dict] = []
-    for st in target_statuses:
-        res = db.table("companies").select("*").eq("status", st).limit(limit).execute()
-        companies.extend(res.data or [])
+    with CheckpointRun("enrichment", total=0) as ckpt:
+        # If resuming, fetch companies AFTER the last processed ID
+        resume_filter = ckpt.resume_from
+        if resume_filter:
+            log.info(f"Enrichment: Resume ab ID {resume_filter}")
 
-    # De-dup by id
-    seen: set[str] = set()
-    companies = [c for c in companies if not (c["id"] in seen or seen.add(c["id"]))]
-    companies = companies[:limit]
+        companies: list[dict] = []
+        for st in target_statuses:
+            q = db.table("companies").select("*").eq("status", st).order("id")
+            if resume_filter:
+                # Skip already-processed companies
+                q = q.gt("id", resume_filter)
+            res = q.limit(limit).execute()
+            companies.extend(res.data or [])
 
-    log.info(f"Enrichment: {len(companies)} Firmen zu anreichern")
+        # De-dup by id
+        seen: set[str] = set()
+        companies = [c for c in companies if not (c["id"] in seen or seen.add(c["id"]))]
+        companies = companies[:limit]
 
-    ok = 0
-    with httpx.Client(headers=HEADERS, follow_redirects=True) as client:
-        for i, company in enumerate(companies, 1):
-            try:
-                enrich_company(company, client)
-                ok += 1
-                log.info(f"[{i}/{len(companies)}] {company['name']}")
-            except Exception as e:
-                log.warning(f"[{i}/{len(companies)}] Fehler bei {company['name']}: {e}")
-            # Polite delay after every LLM call
-            time.sleep(0.3)
+        if not companies:
+            log.info("Enrichment: Nichts zu tun")
+            return
 
-    log.info(f"Enrichment: {ok}/{len(companies)} erfolgreich")
+        ckpt.total = (ckpt.processed or 0) + len(companies)
+        log.info(f"Enrichment: {len(companies)} Firmen zu anreichern"
+                 + (f" (Resume, bereits {ckpt.processed} verarbeitet)" if resume_filter else ""))
+
+        ok = 0
+        with httpx.Client(headers=HEADERS, follow_redirects=True) as client:
+            for i, company in enumerate(companies, 1):
+                try:
+                    enrich_company(company, client)
+                    ok += 1
+                    ckpt.tick(company["id"])  # ← Checkpoint schreiben alle 50
+                    log.info(f"[{i}/{len(companies)}] {company['name']}")
+                except KeyboardInterrupt:
+                    log.info(f"Enrichment: Unterbrochen bei {i} — Checkpoint gespeichert")
+                    raise   # CheckpointRun.__exit__ saves 'interrupted'
+                except Exception as e:
+                    log.warning(f"[{i}/{len(companies)}] Fehler bei {company['name']}: {e}")
+                    ckpt.tick(company["id"])   # Skip fehlerhafte Firma, nicht nochmal versuchen
+                # Polite delay after every LLM call
+                time.sleep(0.3)
+
+        log.info(f"Enrichment: {ok}/{len(companies)} erfolgreich")

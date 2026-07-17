@@ -111,15 +111,15 @@ def scan_delta(
     known_uids: set[str],
     canton_filter: list[str] | None = None,
     on_batch: Callable[[list[dict]], None] | None = None,
+    on_cursor: Callable[[str], None] | None = None,
     batch_size: int = 5_000,
+    resume_cursor: str | None = None,
 ) -> list[dict]:
     """
     Scannt Zefix und gibt nur NEUE Firmen (nicht in known_uids) zurück.
 
-    on_batch: optionaler Callback, der alle batch_size Firmen aufgerufen wird.
-              Wenn gesetzt, wird er mit dem aktuellen Batch aufgerufen und der
-              Puffer geleert — Speicherbedarf bleibt konstant O(batch_size).
-              Ohne on_batch: alle Firmen werden in einer Liste zurückgegeben.
+    resume_cursor: "done_count" — überspringt die ersten N Iterationen
+    on_cursor:     Callback nach jedem Batch mit aktuellem Cursor (für Checkpoint)
     """
     kantone = canton_filter or KANTONE
     new_companies: list[dict] = []
@@ -129,12 +129,22 @@ def scan_delta(
     total = len(PREFIXES) * len(kantone) * len(RECHTSFORMEN)
     done  = 0
 
+    # Resume: skip already-done iterations
+    resume_done = int(resume_cursor) if resume_cursor and resume_cursor.isdigit() else 0
+    if resume_done > 0:
+        log.info(f"Zefix: Resume ab Iteration {resume_done}/{total}")
+
     for kt in kantone:
         kt_new = 0
         for rf in RECHTSFORMEN:
             for prefix in PREFIXES:
-                results = _search(prefix, kt, rf)
                 done += 1
+
+                # Skip already-processed iterations
+                if done <= resume_done:
+                    continue
+
+                results = _search(prefix, kt, rf)
 
                 for raw in results:
                     company = _normalize(raw, kt)
@@ -151,6 +161,9 @@ def scan_delta(
                     on_batch(new_companies)
                     total_flushed += len(new_companies)
                     new_companies = []
+                    # Save cursor after each batch
+                    if on_cursor:
+                        on_cursor(str(done))
 
                 if done % 200 == 0:
                     pct = done / total * 100
@@ -171,5 +184,5 @@ def scan_delta(
         new_companies = []
 
     grand_total = total_flushed + len(new_companies)
-    log.info(f"Zefix: Scan abgeschlossen — {grand_total} neue Firmen")
+    log.info(f"Zefix: Scan abgeschlossen — {grand_total} neue Firmen, gesamt {done}/{total} Iterationen")
     return new_companies  # leer wenn on_batch, voll wenn nicht

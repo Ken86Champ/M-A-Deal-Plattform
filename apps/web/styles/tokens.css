@@ -1,72 +1,44 @@
-/* Deal Origination — Design Tokens — Light + Electric */
+/* Deal Origination — Design Tokens — Blueprint Exact Match */
 
 :root {
-  /* ── Basis ───────────────────────────────────────────────────────────────── */
-  --bg:        #F0F2FF;
+  /* Basis */
+  --bg:        #F1F3F5;
   --panel:     #FFFFFF;
-  --ink:       #0C0E1A;
-  --muted:     #7B82A0;
-  --line:      #E2E6F5;
-  --border:    #CDD2EC;
-  --ink-muted: #4A5170;
+  --ink:       #111827;
+  --muted:     #6B7280;
+  --line:      #E5E7EB;
+  --border:    #D1D5DB;
+  --ink-muted: #374151;
 
-  /* ── Ebene 1 · Off-Market = Vibrant Teal ────────────────────────────────── */
-  --l1:      #00B88A;
-  --l1-soft: rgba(0, 184, 138, 0.10);
-  --l1-line: rgba(0, 184, 138, 0.22);
+  /* Ebene 1 - Off-Market = Emerald/Teal */
+  --l1:        #10B981;
+  --l1-soft:   #D1FAE5;
+  --l1-line:   rgba(16,185,129,0.25);
 
-  /* ── Ebene 2 · On-Market = Electric Indigo ───────────────────────────────── */
-  --l2:      #5C6EFF;
-  --l2-soft: rgba(92, 110, 255, 0.10);
-  --l2-line: rgba(92, 110, 255, 0.22);
+  /* Ebene 2 - On-Market = Blue */
+  --l2:        #3B82F6;
+  --l2-soft:   #DBEAFE;
+  --l2-line:   rgba(59,130,246,0.25);
 
-  /* ── Status ──────────────────────────────────────────────────────────────── */
-  --go:    #00B88A;
-  --amber: #E8920A;
-  --red:   #E5383B;
-  --grey:  #C8CDDF;
-  --green: #00B88A;
+  /* Status */
+  --go:    #22C55E;
+  --amber: #F59E0B;
+  --red:   #EF4444;
+  --grey:  #9CA3AF;
 
-  /* ── Form ────────────────────────────────────────────────────────────────── */
-  --radius: 14px;
+  --radius: 10px;
 
-  /* ── Marken-Gradient (Thermoskala) ───────────────────────────────────────── */
-  --brand-gradient: linear-gradient(
-    90deg,
-    #F6BE45, #E8663C, #C2416B, #6C4A96, #3D5CA6
-  );
+  /* Sidebar */
+  --sidebar-bg:   #FFFFFF;
+  --sidebar-line: #F3F4F6;
+  --active-bg:    #111827;
+  --active-text:  #FFFFFF;
 }
 
-/* ── Base Reset ──────────────────────────────────────────────────────────── */
-
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-html, body {
-  height: 100%;
-  background: var(--bg);
-  color: var(--ink);
-  font-family: 'IBM Plex Sans', system-ui, sans-serif;
-  -webkit-font-smoothing: antialiased;
-}
-
-/* ── Score colors ────────────────────────────────────────────────────────── */
-.score-go    { color: var(--go);    }
-.score-amber { color: var(--amber); }
-.score-grey  { color: var(--muted); }
-
-/* ── Gate dots ───────────────────────────────────────────────────────────── */
-.gate-gruen { background: var(--go);    }
-.gate-gelb  { background: var(--amber); }
-.gate-rot   { background: var(--red);   }
-.gate-offen { background: var(--grey);  }
-
-/* ── Monospace ───────────────────────────────────────────────────────────── */
-.tabular { font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; }
-
-/* ── Scrollbar ───────────────────────────────────────────────────────────── */
-::-webkit-scrollbar        { width: 4px; height: 4px; }
-::-webkit-scrollbar-track  { background: transparent; }
-::-webkit-scrollbar-thumb  { background: var(--line); border-radius: 2px; }
-
-/* ── Selection ───────────────────────────────────────────────────────────── */
-::selection { background: rgba(92,110,255,0.18); color: var(--ink); }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;background:var(--bg);color:var(--ink);font-family:'IBM Plex Sans',system-ui,sans-serif;-webkit-font-smoothing:antialiased;}
+.tabular{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums;}
+::-webkit-scrollbar{width:4px;height:4px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:var(--line);border-radius:2px;}
+::selection{background:rgba(16,185,129,0.18);color:var(--ink);}

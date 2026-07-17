@@ -1,267 +1,172 @@
 'use client'
 import { useRef, useState } from 'react'
-import { Play, Square, RefreshCw, Zap, Search, TrendingUp, LayoutList } from 'lucide-react'
+import { useDeals } from '@/lib/use-deals'
+import { Play, Square, RefreshCw, Zap, Search, TrendingUp, LayoutList, ChevronRight } from 'lucide-react'
+import Link from 'next/link'
 
-type Stage = 'process' | 'all' | 'radar' | 'enrichment' | 'scoring'
-type RunState = 'idle' | 'running' | 'done' | 'error'
-
-const STAGES: { id: Stage; label: string; desc: string; icon: React.ReactNode; color: string }[] = [
-  {
-    id:    'process',
-    label: 'Verarbeiten',
-    desc:  'Bestehende Firmen anreichern + scoren (kein neuer Scan). Ideal nach erstem Import.',
-    icon:  <Zap size={15} />,
-    color: 'var(--go)',
-  },
-  {
-    id:    'all',
-    label: 'Alles ausführen',
-    desc:  'Vollständige Pipeline: Radar (Zefix + Broker) → Anreichern → Scoren → Dossier',
-    icon:  <Play size={15} />,
-    color: 'var(--l2)',
-  },
-  {
-    id:    'radar',
-    label: 'Radar (nur Scan)',
-    desc:  'Neue Firmen aus Zefix + companymarket.ch + firmenboerse.com einlesen (kein Scoring)',
-    icon:  <Search size={15} />,
-    color: 'var(--l1)',
-  },
-  {
-    id:    'enrichment',
-    label: 'Anreichern',
-    desc:  'Websites besuchen, Inhaberdaten + Kennzahlen extrahieren (Claude Haiku)',
-    icon:  <RefreshCw size={15} />,
-    color: 'var(--amber)',
-  },
-  {
-    id:    'scoring',
-    label: 'Scoren',
-    desc:  'Nachfolge- & Investierbarkeits-Score berechnen, KO-Gates setzen',
-    icon:  <TrendingUp size={15} />,
-    color: 'var(--amber)',
-  },
+const STAGE_ORDER = [
+  { id: 'new-qualified',  label: 'Neu & Qualifiziert', color: '#5C6EFF' },
+  { id: 'in-review',      label: 'In Prüfung',         color: '#8B5CF6' },
+  { id: 'shortlisted',    label: 'Shortlist',           color: '#00B88A' },
+  { id: 'outreach-ready', label: 'Outreach bereit',     color: '#E8920A' },
+  { id: 'contacted',      label: 'Kontaktiert',         color: '#0EA5E9' },
+  { id: 'replied',        label: 'Geantwortet',         color: '#10B981' },
+  { id: 'negotiation',    label: 'Verhandlung',         color: '#F6BE45' },
+  { id: 'won',            label: 'Gewonnen',            color: '#00B88A' },
 ]
 
-export default function PipelinePage() {
-  const [runState,   setRunState]   = useState<RunState>('idle')
-  const [activeStage, setActiveStage] = useState<Stage | null>(null)
-  const [logs,       setLogs]       = useState<string[]>([])
-  const abortRef = useRef<AbortController | null>(null)
+type RunStage = 'process' | 'all' | 'radar' | 'enrichment' | 'scoring'
+type RunState = 'idle' | 'running' | 'done' | 'error'
+
+const RUN_STAGES: { id: RunStage; label: string; desc: string; color: string }[] = [
+  { id: 'process',    label: 'Verarbeiten',   desc: 'Anreichern + Scoren (kein Scan)',                          color: 'var(--go)' },
+  { id: 'all',        label: 'Alles',         desc: 'Vollständige Pipeline: Radar → Anreichern → Scoren',       color: 'var(--l2)' },
+  { id: 'radar',      label: 'Radar',         desc: 'Neue Firmen aus Zefix + Plattformen',                      color: 'var(--l1)' },
+  { id: 'enrichment', label: 'Anreichern',    desc: 'Websites besuchen, Inhaberdaten extrahieren',              color: 'var(--amber)' },
+  { id: 'scoring',    label: 'Scoren',        desc: 'Score berechnen, KO-Gates setzen',                        color: 'var(--amber)' },
+]
+
+export default function FunnelPage() {
+  const { deals: DEALS, loading } = useDeals()
+  const [runState,    setRunState]    = useState<RunState>('idle')
+  const [activeStage, setActiveStage] = useState<RunStage | null>(null)
+  const [logs,        setLogs]        = useState<string[]>([])
+  const abortRef  = useRef<AbortController | null>(null)
   const logBoxRef = useRef<HTMLDivElement>(null)
 
-  async function startStage(stage: Stage) {
-    if (runState === 'running') return
+  const stageCounts = STAGE_ORDER.map(s => ({
+    ...s,
+    count: DEALS.filter(d => d.pipelineStage === s.id).length,
+  }))
+  const totalActive = stageCounts.reduce((acc, s) => acc + s.count, 0)
+  const maxCount    = Math.max(...stageCounts.map(s => s.count), 1)
 
+  async function startStage(stage: RunStage) {
+    if (runState === 'running') return
     setLogs([])
     setRunState('running')
     setActiveStage(stage)
-
     abortRef.current = new AbortController()
-
     try {
-      const res = await fetch(`/api/pipeline/run?stage=${stage}`, {
-        signal: abortRef.current.signal,
-      })
-
-      if (!res.body) {
-        setLogs(['[Kein Stream erhalten]'])
-        setRunState('error')
-        return
-      }
-
+      const res = await fetch(`/api/pipeline/run?stage=${stage}`, { signal: abortRef.current.signal })
+      if (!res.body) { setLogs(['[Kein Stream]']); setRunState('error'); return }
       const reader = res.body.getReader()
       const dec    = new TextDecoder()
       let   buf    = ''
-
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
-
         buf += dec.decode(value, { stream: true })
         const parts = buf.split('\n\n')
         buf = parts.pop() ?? ''
-
         for (const part of parts) {
           const line = part.replace(/^data:\s?/, '').trim()
-          if (line) {
-            setLogs(prev => {
-              const next = [...prev, line]
-              // Auto-scroll
-              setTimeout(() => {
-                if (logBoxRef.current) {
-                  logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight
-                }
-              }, 0)
-              return next
-            })
-          }
+          if (line) setLogs(prev => { const next = [...prev, line]; setTimeout(() => { if (logBoxRef.current) logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight }, 0); return next })
         }
       }
-
       setRunState('done')
     } catch (e: any) {
-      if (e?.name === 'AbortError') {
-        setLogs(prev => [...prev, '[Abgebrochen]'])
-        setRunState('idle')
-      } else {
-        setLogs(prev => [...prev, `[Fehler: ${e?.message}]`])
-        setRunState('error')
-      }
-    } finally {
-      setActiveStage(null)
-    }
+      if (e?.name === 'AbortError') { setLogs(prev => [...prev, '[Abgebrochen]']); setRunState('idle') }
+      else { setLogs(prev => [...prev, `[Fehler: ${e?.message}]`]); setRunState('error') }
+    } finally { setActiveStage(null) }
   }
-
-  function abort() {
-    abortRef.current?.abort()
-  }
-
-  const stateColor = runState === 'done'    ? 'var(--go)'
-                   : runState === 'error'   ? 'var(--red)'
-                   : runState === 'running' ? 'var(--amber)'
-                   : 'var(--muted)'
-
-  const stateLabel = runState === 'done'    ? 'Abgeschlossen'
-                   : runState === 'error'   ? 'Fehler'
-                   : runState === 'running' ? `Läuft: ${activeStage ?? '…'}`
-                   : 'Bereit'
 
   return (
-    <div className="max-w-[900px] mx-auto px-6 py-6 space-y-6">
-
+    <div className="flex flex-col h-screen overflow-hidden">
       {/* Header */}
-      <div>
-        <h1 className="text-[16px] font-semibold" style={{ color: 'var(--ink)' }}>
-          Pipeline
-        </h1>
-        <p className="text-[12px] mt-0.5" style={{ color: 'var(--muted)' }}>
-          Firmen anreichern, scoren und qualifizieren. Läuft täglich automatisch (06:00–09:00 Uhr).
-        </p>
+      <div className="flex-none px-6 py-4 flex items-center justify-between" style={{ borderBottom: '1px solid var(--line)', background: 'var(--panel)' }}>
+        <div>
+          <div className="text-[10px] font-semibold tracking-widest uppercase" style={{ color: 'var(--muted)' }}>Origination</div>
+          <h1 className="text-[18px] font-semibold tracking-tight mt-0.5" style={{ color: 'var(--ink)' }}>Pipeline Funnel</h1>
+        </div>
+        <Link href="/deals" className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12px] font-medium" style={{ background: 'var(--bg)', color: 'var(--muted)', border: '1px solid var(--line)' }}>
+          <LayoutList size={12} /> Kanban-Ansicht
+        </Link>
       </div>
 
-      {/* Stage cards */}
-      <div className="grid gap-3 sm:grid-cols-2">
-        {STAGES.map(s => (
-          <button
-            key={s.id}
-            onClick={() => startStage(s.id)}
-            disabled={runState === 'running'}
-            className="text-left rounded-xl px-4 py-3.5 transition-all group"
-            style={{
-              background:  'var(--panel)',
-              border:      `1px solid ${runState === 'running' && activeStage === s.id ? s.color : 'var(--line)'}`,
-              opacity:     runState === 'running' && activeStage !== s.id ? 0.5 : 1,
-              cursor:      runState === 'running' ? 'not-allowed' : 'pointer',
-            }}
-          >
-            <div className="flex items-center gap-2 mb-1">
-              <span style={{ color: s.color }}>{s.icon}</span>
-              <span className="text-[13px] font-semibold" style={{ color: 'var(--ink)' }}>
-                {s.label}
-              </span>
-              {runState === 'running' && activeStage === s.id && (
-                <span
-                  className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded animate-pulse"
-                  style={{ background: s.color + '22', color: s.color }}
+      <div className="flex-1 overflow-auto p-6 space-y-6">
+
+        {/* Funnel visualization */}
+        <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--panel)', border: '1px solid var(--line)' }}>
+          <div className="px-5 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--line)' }}>
+            <p className="text-[13px] font-semibold" style={{ color: 'var(--ink)' }}>Deal Funnel</p>
+            <span className="text-[11px]" style={{ color: 'var(--muted)' }}>{totalActive} aktive Deals</span>
+          </div>
+          <div className="p-6 space-y-1.5">
+            {loading ? (
+              <div className="flex items-center justify-center h-40 text-[12px]" style={{ color: 'var(--muted)' }}>
+                <RefreshCw size={13} className="animate-spin mr-2" /> Lade…
+              </div>
+            ) : (
+              stageCounts.map((s, i) => {
+                const pct = (s.count / maxCount) * 100
+                const indent = ((maxCount - s.count) / maxCount) * 18
+                return (
+                  <Link key={s.id} href={`/inbox?stage=${s.id}`}>
+                    <div className="flex items-center gap-3 group cursor-pointer" style={{ paddingLeft: `${indent}%`, paddingRight: `${indent}%` }}>
+                      <div
+                        className="flex-1 flex items-center justify-between px-4 py-2.5 rounded-xl transition-opacity hover:opacity-90"
+                        style={{ background: s.color + '20', border: `1px solid ${s.color}44` }}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <span className="w-2 h-2 rounded-full flex-none" style={{ background: s.color }} />
+                          <span className="text-[12px] font-medium" style={{ color: 'var(--ink)' }}>{s.label}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[13px] font-bold font-mono" style={{ color: s.color }}>{s.count}</span>
+                          <ChevronRight size={12} style={{ color: 'var(--muted)' }} />
+                        </div>
+                      </div>
+                    </div>
+                  </Link>
+                )
+              })
+            )}
+          </div>
+        </div>
+
+        {/* Pipeline Runner */}
+        <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--panel)', border: '1px solid var(--line)' }}>
+          <div className="px-5 py-3" style={{ borderBottom: '1px solid var(--line)' }}>
+            <p className="text-[13px] font-semibold" style={{ color: 'var(--ink)' }}>Pipeline ausführen</p>
+            <p className="text-[11px] mt-0.5" style={{ color: 'var(--muted)' }}>KI-Agenten manuell starten</p>
+          </div>
+          <div className="p-5">
+            <div className="grid grid-cols-3 gap-2 mb-4">
+              {RUN_STAGES.map(s => (
+                <button
+                  key={s.id}
+                  onClick={() => startStage(s.id)}
+                  disabled={runState === 'running'}
+                  className="flex flex-col items-start gap-1 p-3 rounded-xl text-left transition-all disabled:opacity-50"
+                  style={{ background: activeStage === s.id ? s.color + '20' : 'var(--bg)', border: `1px solid ${activeStage === s.id ? s.color + '60' : 'var(--line)'}` }}
                 >
-                  läuft…
-                </span>
-              )}
+                  <span className="text-[12px] font-semibold" style={{ color: activeStage === s.id ? s.color : 'var(--ink)' }}>{s.label}</span>
+                  <span className="text-[10px]" style={{ color: 'var(--muted)' }}>{s.desc}</span>
+                </button>
+              ))}
             </div>
-            <p className="text-[11px] leading-relaxed" style={{ color: 'var(--muted)' }}>
-              {s.desc}
-            </p>
-          </button>
-        ))}
-      </div>
-
-      {/* Log window */}
-      <div
-        className="rounded-xl overflow-hidden"
-        style={{ background: 'var(--panel)', border: '1px solid var(--line)' }}
-      >
-        {/* Log toolbar */}
-        <div
-          className="flex items-center justify-between px-4 py-2"
-          style={{ borderBottom: '1px solid var(--line)' }}
-        >
-          <div className="flex items-center gap-2">
-            <LayoutList size={12} style={{ color: 'var(--muted)' }} />
-            <span className="text-[11px] font-medium" style={{ color: 'var(--muted)' }}>
-              Log
-            </span>
-            <span
-              className="text-[10px] font-medium px-1.5 py-0.5 rounded"
-              style={{ color: stateColor, background: stateColor + '18' }}
-            >
-              {stateLabel}
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            {runState === 'running' && (
-              <button
-                onClick={abort}
-                className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md transition-colors"
-                style={{ color: 'var(--red)', border: '1px solid var(--line)', background: 'transparent' }}
-              >
-                <Square size={10} />
-                Abbrechen
-              </button>
-            )}
-            {logs.length > 0 && runState !== 'running' && (
-              <button
-                onClick={() => setLogs([])}
-                className="text-[11px] px-2.5 py-1 rounded-md transition-colors"
-                style={{ color: 'var(--muted)', border: '1px solid var(--line)', background: 'transparent' }}
-              >
-                Leeren
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Log content */}
-        <div
-          ref={logBoxRef}
-          className="font-mono text-[11px] leading-relaxed p-4 overflow-y-auto"
-          style={{
-            height:     '420px',
-            color:      'var(--ink)',
-            background: '#0f1012',
-          }}
-        >
-          {logs.length === 0 ? (
-            <span style={{ color: '#555' }}>
-              Wähle eine Stage um die Pipeline zu starten…
-            </span>
-          ) : (
-            logs.map((line, i) => {
-              const isWarn  = /\[(WARNING|WARN)\]/.test(line)
-              const isError = /\[(ERROR|CRITICAL)\]/.test(line) || line.startsWith('[Fehler')
-              const isDone  = line.startsWith('[Pipeline beendet') || line.startsWith('[Verarbeitung') || line.startsWith('[Pipeline: Stage')
-              const color   = isError ? '#f87171'
-                            : isWarn  ? '#fbbf24'
-                            : isDone  ? '#86efac'
-                            : '#d1d5db'
-              return (
-                <div key={i} style={{ color }}>
-                  {line}
+            {logs.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] uppercase tracking-widest font-semibold" style={{ color: 'var(--muted)' }}>Live-Log</span>
+                  {runState === 'running' && (
+                    <button onClick={() => abortRef.current?.abort()} className="text-[10px] px-2 py-0.5 rounded" style={{ background: 'var(--red)', color: '#fff' }}>
+                      <Square size={10} className="inline mr-1" /> Stop
+                    </button>
+                  )}
                 </div>
-              )
-            })
-          )}
+                <div
+                  ref={logBoxRef}
+                  className="h-40 overflow-y-auto p-3 rounded-xl font-mono text-[11px] space-y-0.5"
+                  style={{ background: '#0C0F1C', color: '#A0F0C0' }}
+                >
+                  {logs.map((l, i) => <div key={i}>{l}</div>)}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-
-      {/* Info box */}
-      <div
-        className="rounded-xl px-4 py-3 text-[11px] leading-relaxed"
-        style={{ background: 'var(--panel)', border: '1px solid var(--line)', color: 'var(--muted)' }}
-      >
-        <strong style={{ color: 'var(--ink)' }}>Tipp:</strong> Beim ersten Start → "Verarbeiten" klicken (enrichment + scoring der bestehenden Firmen).{' '}
-        Danach erscheinen qualifizierte Firmen automatisch in der Qualified-Liste.{' '}
-        Tägliche Automatisierung läuft über Inngest-Crons (06:00–09:00).
       </div>
     </div>
   )
